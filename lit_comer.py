@@ -61,7 +61,6 @@ class LitCoMER(pl.LightningModule):
         img: FloatTensor,
         img_mask: LongTensor,
         tgt: LongTensor,
-        rel_ids: Optional[LongTensor] = None
     ) -> FloatTensor:
         """run img and bi-tgt
 
