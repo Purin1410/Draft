@@ -16,18 +16,12 @@ class Vocab:
         self.word2idx["<sos>"] = self.SOS_IDX
         self.word2idx["<eos>"] = self.EOS_IDX
 
-        has_space = False
         with open(dict_path, "r", encoding="utf-8") as f:
             for line in f:
                 w = line.rstrip("\n")
                 if w == "":
                     continue
-                if w == " ":
-                    has_space = True
                 self.word2idx[w] = len(self.word2idx)
-
-        if not has_space:
-            self.word2idx[" "] = len(self.word2idx)
 
         self.idx2word: Dict[int, str] = {v: k for k, v in self.word2idx.items()}
 
