@@ -55,14 +55,11 @@ model:
     embed_hidden_dim: null
     mlp_hidden_dim: 128
     dropout: 0.3
-    special_symbol_policy: "source_compatible"
-    aux_targets_from_batch: true
   loss:
     word_weight: 1.0
     layer_weight: 0.25
     pos_weight: 0.25
     normalize_by_weight_sum: true
-    aux_ignore_index: null
   implicit_attention_correction:
     enabled: true
     mask_tokens: ["{", "^", "_"]
@@ -87,7 +84,7 @@ model:
     Adadelta:
       lr: 1
       weight_decay: 1e-4
-      epsilon: 1e-6
+      eps: 1e-6
 
   scheduler:
     use: ReduceLROnPlateau # ReduceLROnPlateau
@@ -127,7 +124,6 @@ data:
   pin_memory: true
   persistent_workers: true
   lazy_load: false
-  pad_strategy: "batch_max"
 
 wandb:
   name: "PosFormer"
