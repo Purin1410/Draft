@@ -7,7 +7,6 @@ from .utils import (build_train_dataset,
                     BucketedBatchSampler)
 from .vocab import Vocab
 from .utils import Batch
-from models.transformer.tree_bias import TreeRelationBuilder
 import torch
 
 class CROHMEDatamodule(pl.LightningDataModule):
@@ -43,21 +42,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
         self.persistent_workers         = data_config.persistent_workers
         if CROHMEDatamodule.shared_vocab is None:
             CROHMEDatamodule.shared_vocab = Vocab(dict_path=data_config.dictionary_txt)
-        self.vocab = CROHMEDatamodule.shared_vocab
-
-        # Tree bias builder for precomputing rel_ids in DataLoader workers
-        mcfg = self.config.model
-        if mcfg.get("use_tree_bias", True):
-            self.tree_builder = TreeRelationBuilder(
-                id2tok=self.vocab.idx2word,
-                pad_id=self.vocab.PAD_IDX,
-                num_buckets=mcfg.get("tree_bias_num_buckets", 16),
-                mode=mcfg.get("tree_bias_mode", "full"),
-                rel_set=mcfg.get("tree_bias_rel_set", "full"),
-            )
-        else:
-            self.tree_builder = None
-        
+        self.vocab = CROHMEDatamodule.shared_vocab        
         self.train_batch_sampler = None
         self.val_batch_sampler = None
         self.test_batch_sampler = None
@@ -113,11 +98,6 @@ class CROHMEDatamodule(pl.LightningDataModule):
             pad_id=self.vocab.PAD_IDX,
         )
 
-        # Precompute tree relation IDs on CPU (offloaded to DataLoader workers)
-        rel_ids = None
-        if self.tree_builder is not None:
-            rel_ids = self.tree_builder.build(tgt)
-
         return Batch(
             img_bases=fnames,
             imgs=x,
@@ -127,7 +107,6 @@ class CROHMEDatamodule(pl.LightningDataModule):
             out=out,
             labels=labels,
             lengths=lengths,
-            rel_ids=rel_ids
         )
 
         
@@ -265,4 +244,4 @@ class CROHMEDatamodule(pl.LightningDataModule):
             pin_memory          = self.pin_memory,
             persistent_workers  = self.persistent_workers,
             worker_init_fn      = self._get_worker_init_fn(),
-        )
+        )

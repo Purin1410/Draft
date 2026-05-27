@@ -97,7 +97,6 @@ class MultiheadAttention(nn.Module):
         key_padding_mask: Optional[Tensor] = None,
         need_weights: bool = True,
         attn_mask: Optional[Tensor] = None,
-        rel_bias: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Optional[Tensor]]:
         if not self._qkv_same_embed_dim:
             return multi_head_attention_forward(
@@ -144,7 +143,6 @@ class MultiheadAttention(nn.Module):
                 key_padding_mask=key_padding_mask,
                 need_weights=need_weights,
                 attn_mask=attn_mask,
-                rel_bias=rel_bias,
             )
 
 
@@ -175,7 +173,6 @@ def multi_head_attention_forward(
     v_proj_weight: Optional[Tensor] = None,
     static_k: Optional[Tensor] = None,
     static_v: Optional[Tensor] = None,
-    rel_bias: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Optional[Tensor]]:
     tgt_len, bsz, embed_dim = query.size()
     assert embed_dim == embed_dim_to_check
@@ -369,37 +366,6 @@ def multi_head_attention_forward(
 
     attn_output_weights = torch.bmm(q, k.transpose(1, 2))
     assert list(attn_output_weights.size()) == [bsz * num_heads, tgt_len, src_len]
-
-    if rel_bias is not None:
-        if rel_bias.dim() == 3:
-            if rel_bias.size(0) == bsz:
-                rel_bias = rel_bias.unsqueeze(1).expand(bsz, num_heads, tgt_len, src_len)
-                rel_bias = rel_bias.contiguous().view(bsz * num_heads, tgt_len, src_len)
-            elif rel_bias.size(0) == bsz * num_heads:
-                pass
-            else:
-                raise RuntimeError(
-                    f"rel_bias has invalid first dim: {rel_bias.size(0)} "
-                    f"expected {bsz} or {bsz * num_heads}"
-                )
-        elif rel_bias.dim() == 4:
-            if rel_bias.size(0) == bsz and rel_bias.size(1) == num_heads:
-                rel_bias = rel_bias.contiguous().view(bsz * num_heads, tgt_len, src_len)
-            else:
-                raise RuntimeError(
-                    f"rel_bias has invalid shape: {tuple(rel_bias.shape)}; "
-                    f"expected ({bsz}, {num_heads}, {tgt_len}, {src_len})"
-                )
-        else:
-            raise RuntimeError(f"rel_bias must have dim 3 or 4, got {rel_bias.dim()}")
-
-        if rel_bias.size(1) != tgt_len or rel_bias.size(2) != src_len:
-            raise RuntimeError(
-                f"rel_bias length mismatch: got {tuple(rel_bias.shape)}, "
-                f"expected (*, {tgt_len}, {src_len})"
-            )
-
-        attn_output_weights.add_(rel_bias.to(dtype=attn_output_weights.dtype))
 
     def mask_softmax_dropout(dots):
         if attn_mask is not None:

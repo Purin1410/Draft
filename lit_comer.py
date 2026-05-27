@@ -79,10 +79,10 @@ class LitCoMER(pl.LightningModule):
         FloatTensor
             [2b, l, vocab_size]
         """
-        return self.comer_model(img, img_mask, tgt, rel_ids=rel_ids)
+        return self.comer_model(img, img_mask, tgt)
 
     def training_step(self, batch: Batch, _):
-        out_hat = self(batch.imgs, batch.mask, batch.tgt, rel_ids=batch.rel_ids)
+        out_hat = self(batch.imgs, batch.mask, batch.tgt)
 
         loss = ce_loss(out_hat, batch.out, ignore_idx=self.vocab_info.pad_id)
         self.log("train_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
@@ -90,7 +90,7 @@ class LitCoMER(pl.LightningModule):
         return loss
 
     def validation_step(self, batch: Batch, _):
-        out_hat = self(batch.imgs, batch.mask, batch.tgt, rel_ids=batch.rel_ids)
+        out_hat = self(batch.imgs, batch.mask, batch.tgt)
 
         loss = ce_loss(out_hat, batch.out, ignore_idx=self.vocab_info.pad_id)
         self.log(

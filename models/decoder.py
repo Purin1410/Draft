@@ -13,7 +13,6 @@ from .transformer.transformer_decoder import (
     TransformerDecoder,
     TransformerDecoderLayer,
 )
-from .transformer.tree_bias import TreeRelationBuilder, TreeRelativeBias
 from utils.generation_utils import DecodeModel
 
 
@@ -26,7 +25,6 @@ def _build_transformer_decoder(
     dc: int,
     cross_coverage: bool,
     self_coverage: bool,
-    tree_bias_layers: str = "all",
 ) -> nn.TransformerDecoder:
     decoder_layer = TransformerDecoderLayer(
         d_model=d_model,
@@ -39,7 +37,7 @@ def _build_transformer_decoder(
     else:
         arm = None
 
-    decoder = TransformerDecoder(decoder_layer, num_decoder_layers, arm, tree_bias_layers=tree_bias_layers)
+    decoder = TransformerDecoder(decoder_layer, num_decoder_layers, arm)
     return decoder
 
 
@@ -55,11 +53,6 @@ class Decoder(DecodeModel):
         cross_coverage: bool,
         self_coverage: bool,
         vocab_info: VocabInfo,
-        use_tree_bias: bool = True,
-        tree_bias_num_buckets: int = 16,
-        tree_bias_mode: str = "full",
-        tree_bias_layers: str = "all",
-        tree_bias_rel_set: str = "full",
     ):
         super().__init__()
         self.vocab_info = vocab_info
@@ -81,37 +74,10 @@ class Decoder(DecodeModel):
             dc=dc,
             cross_coverage=cross_coverage,
             self_coverage=self_coverage,
-            tree_bias_layers=tree_bias_layers,
         )
 
         self.proj = nn.Linear(d_model, vocab_info.vocab_size)
 
-        # -----------------------------
-        # Tree-structure relative bias
-        # -----------------------------
-        self.use_tree_bias = bool(use_tree_bias)
-        self.tree_bias_layers = tree_bias_layers
-
-        if self.use_tree_bias:
-            if vocab_info is None or vocab_info.words is None or not hasattr(vocab_info.words, "idx2word"):
-                raise ValueError("Tree bias requires vocab_info.words.idx2word")
-
-            self._tree_builder = TreeRelationBuilder(
-                id2tok=vocab_info.words.idx2word,
-                pad_id=vocab_info.pad_id,
-                num_buckets=tree_bias_num_buckets,
-                mode=tree_bias_mode,
-                rel_set=tree_bias_rel_set,
-            )
-            self._tree_rel_bias = TreeRelativeBias(
-                num_heads=nhead,
-                num_relations=self._tree_builder.num_relations,
-            )
-        else:
-            self._tree_builder = None
-            self._tree_rel_bias = None
-        # Causal mask cache: keyed by (device_type, device_index, dtype_str)
-        # so CPU->CUDA or dtype changes don't reuse a stale/wrong-device mask.
         self._causal_mask_cache = {}
 
     def _build_attention_mask(self, length, device=None, dtype=torch.bool):
@@ -131,7 +97,7 @@ class Decoder(DecodeModel):
         return mask
 
     def forward(
-        self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor, rel_ids: Optional[LongTensor] = None
+        self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor
     ) -> FloatTensor:
         """generate output for tgt
 
@@ -152,13 +118,7 @@ class Decoder(DecodeModel):
         B_tgt, l = tgt.size()
         tgt_mask = self._build_attention_mask(l)
         tgt_pad_mask = tgt == self.vocab_info.pad_id
-
-        rel_bias = None
-        if self.use_tree_bias and self._tree_rel_bias is not None:
-            if rel_ids is None:
-                rel_ids = self._tree_builder.build(tgt)
-            rel_bias = self._tree_rel_bias(rel_ids, flatten=True)
-
+        
         tgt = self.word_embed(tgt)  # [b, l, d]
         tgt = self.pos_enc(tgt)  # [b, l, d]
         tgt = self.norm(tgt)

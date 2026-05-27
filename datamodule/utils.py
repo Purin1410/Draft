@@ -251,7 +251,6 @@ class Batch:
     out: Optional[LongTensor] = None
     labels: Optional[LongTensor] = None
     lengths: Optional[LongTensor] = None
-    rel_ids: Optional[LongTensor] = None
 
     def __len__(self) -> int:
         return len(self.img_bases)
@@ -266,7 +265,6 @@ class Batch:
             out=None if self.out is None else self.out.pin_memory(),
             labels=None if self.labels is None else self.labels.pin_memory(),
             lengths=None if self.lengths is None else self.lengths.pin_memory(),
-            rel_ids=None if self.rel_ids is None else self.rel_ids.pin_memory(),
         )
 
     def to(self, device, non_blocking=True) -> "Batch":
@@ -279,5 +277,4 @@ class Batch:
             out=None if self.out is None else self.out.to(device, non_blocking=non_blocking),
             labels=None if self.labels is None else self.labels.to(device, non_blocking=non_blocking),
             lengths=None if self.lengths is None else self.lengths.to(device, non_blocking=non_blocking),
-            rel_ids=None if self.rel_ids is None else self.rel_ids.to(device, non_blocking=non_blocking),
         )
