@@ -14,7 +14,6 @@ class Vocab:
     def __init__(
         self,
         dict_path: str = "crohme_dictionary.txt",
-        force_ical_special_token_order: bool = True,
         special_tokens: Optional[Dict[str, str]] = None,
         implicit_structural_tokens: Optional[Sequence[str]] = None,
     ) -> None:
@@ -26,22 +25,10 @@ class Vocab:
         self.implicit_structural_tokens = tuple(
             implicit_structural_tokens or ("{", "}", "^", "_")
         )
-        self.force_ical_special_token_order = force_ical_special_token_order
 
         self.word2idx = dict()
         self._duplicate_specials_warned = False
 
-        if force_ical_special_token_order:
-            self.word2idx[self.pad_token] = self.PAD_IDX
-            self.word2idx[self.sos_token] = self.SOS_IDX
-            self.word2idx[self.eos_token] = self.EOS_IDX
-            self.word2idx[self.space_token] = self.ICAL_SPACE_ID
-        else:
-            self.word2idx[self.pad_token] = self.PAD_IDX
-            self.word2idx[self.sos_token] = self.SOS_IDX
-            self.word2idx[self.eos_token] = self.EOS_IDX
-
-        has_space = False
         with open(dict_path, "r", encoding="utf-8") as f:
             for line in f:
                 w = line.rstrip("\n\r")
@@ -62,18 +49,23 @@ class Vocab:
                         )
                         self._duplicate_specials_warned = True
                     continue
-                if w == self.space_token or w == " ":
-                    has_space = True
                 self.word2idx[w] = len(self.word2idx)
-
-        if not force_ical_special_token_order and not has_space:
-            self.word2idx[" "] = len(self.word2idx)
 
         self.idx2word: Dict[int, str] = {v: k for k, v in self.word2idx.items()}
         self.PAD_IDX = self.word2idx[self.pad_token]
         self.SOS_IDX = self.word2idx[self.sos_token]
         self.EOS_IDX = self.word2idx[self.eos_token]
-        self.space_id = self.word2idx.get(self.space_token, self.word2idx.get(" "))
+        self.space_id = self.word2idx[self.space_token]
+
+        if self.PAD_IDX != 0 or self.SOS_IDX != 1 or self.EOS_IDX != 2 or self.space_id != 3:
+            raise ValueError(
+                "ICAL requires fixed special ids: "
+                "<pad>=0, <sos>=1, <eos>=2, <space>=3"
+            )
+
+        missing = [t for t in self.implicit_structural_tokens if t not in self.word2idx]
+        if missing:
+            raise ValueError(f"Missing ICAL structural tokens in dictionary: {missing}")
 
 
     def words2indices(self, words: List[str]) -> List[int]:
@@ -91,10 +83,11 @@ class Vocab:
 
     def get_info(self) -> VocabInfo:
         structural_token_ids = tuple(
-            self.word2idx[token]
-            for token in self.implicit_structural_tokens
-            if token in self.word2idx
+            self.word2idx[token] for token in self.implicit_structural_tokens
         )
+        missing = [t for t in self.implicit_structural_tokens if t not in self.word2idx]
+        if missing:
+            raise ValueError(f"Missing ICAL structural tokens in dictionary: {missing}")
         return VocabInfo(
             vocab_size=len(self),
             sos_id=self.SOS_IDX,

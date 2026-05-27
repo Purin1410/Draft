@@ -43,7 +43,6 @@ class CROHMEDatamodule(pl.LightningDataModule):
         if CROHMEDatamodule.shared_vocab is None:
             CROHMEDatamodule.shared_vocab = Vocab(
                 dict_path=data_config.dictionary_txt,
-                force_ical_special_token_order=data_config.get("force_ical_special_token_order", True),
                 special_tokens=data_config.get("special_tokens", None),
                 implicit_structural_tokens=data_config.get(
                     "implicit_structural_tokens", ["{", "}", "^", "_"]

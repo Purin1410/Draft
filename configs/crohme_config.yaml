@@ -100,7 +100,6 @@ data:
   zipfile_path: crohme_data/data
   test_year: '2014'
   dictionary_txt: crohme_data/data/dictionary.txt
-  force_ical_special_token_order: true
   special_tokens:
     pad: "<pad>"
     sos: "<sos>"

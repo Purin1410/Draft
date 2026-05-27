@@ -59,6 +59,29 @@ class ExpRateRecorder(Metric):
         exp_rate = self.rec / self.total_line
         return exp_rate
 
+def smooth_weight_adjustment(
+    targets: torch.Tensor,
+    class_of_interest: int,
+    base_weight: float = 1.0,
+    max_weight: float = 10.0,
+) -> torch.Tensor:
+    """
+    ICAL-original dynamic weight.
+
+    Important:
+    - Count over ALL flattened targets, including PAD positions.
+    - Do NOT mask ignore_idx here.
+    - Do NOT clamp class_count to 1.
+    This intentionally preserves ICAL's original weighting behavior.
+    """
+    class_count = torch.sum(targets == int(class_of_interest))
+    total_count = torch.numel(targets)
+    frequency = class_count.to(dtype=torch.float32) / float(total_count)
+
+    weight = base_weight + torch.log1p(1.0 / ((1.0 - frequency) + 1e-6))
+    weight = torch.clamp(weight, max=max_weight)
+    return weight.to(device=targets.device)
+
 
 def ce_loss(
     output_hat: torch.Tensor,
@@ -68,40 +91,40 @@ def ce_loss(
     need_weight: bool = False,
     class_of_interest: Optional[int] = None,
 ) -> torch.Tensor:
-    """comput cross-entropy loss
+    """Cross-entropy loss for ICAL logits.
 
-    Args:
-        output_hat (torch.Tensor): [batch, len, e]
-        output (torch.Tensor): [batch, len]
-        ignore_idx (int):
-
-    Returns:
-        torch.Tensor: loss value
+    output_hat: [batch, len, vocab_size]
+    output:     [batch, len]
     """
     vocab_size = output_hat.shape[-1]
     flat_hat = output_hat.reshape(-1, vocab_size)
     flat = output.reshape(-1)
+
     weight = None
     if need_weight:
-        weight = torch.ones(vocab_size, device=output_hat.device, dtype=output_hat.dtype)
-        if class_of_interest is not None:
-            valid = flat.ne(ignore_idx)
-            total = valid.sum().clamp_min(1).to(dtype=output_hat.dtype)
-            class_count = flat[valid].eq(class_of_interest).sum().clamp_min(1)
-            frequency = class_count.to(dtype=output_hat.dtype) / total
-            smooth_weight = 1.0 + torch.log1p(1.0 / ((1.0 - frequency) + 1e-6))
-            smooth_weight = torch.clamp(smooth_weight, max=10.0)
-            weight[:] = smooth_weight
-            weight[class_of_interest] = 1.0
-    loss = F.cross_entropy(
+        if class_of_interest is None:
+            raise ValueError("class_of_interest must be set when need_weight=True")
+
+        smooth_weight = smooth_weight_adjustment(
+            flat,
+            class_of_interest=int(class_of_interest),
+        ).to(device=output_hat.device, dtype=output_hat.dtype)
+
+        weight = torch.ones(
+            vocab_size,
+            device=output_hat.device,
+            dtype=output_hat.dtype,
+        )
+        weight[:] = smooth_weight
+        weight[int(class_of_interest)] = 1.0
+
+    return F.cross_entropy(
         flat_hat,
         flat,
         weight=weight,
         ignore_index=ignore_idx,
         reduction=reduction,
     )
-    return loss
-
 
 def to_tgt_output(
     tokens: Union[List[List[int]], List[LongTensor]],
