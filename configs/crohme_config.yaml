@@ -1,0 +1,123 @@
+seed_everything: 7
+
+trainer:
+  checkpoint_callback: true
+  callbacks:
+    - class_path: pytorch_lightning.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+    - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+      init_args:
+        save_top_k: 1
+        monitor: val_ExpRate # val_ExpRate
+        mode: max
+        filename: '{epoch}-{val_ExpRate:.4f}'
+  # gpus: 1
+  gpus: 0,1
+  accelerator: ddp #gpu
+  check_val_every_n_epoch: 2
+  max_epochs: 300
+  deterministic: true
+  resume_from_checkpoint: null
+  val_check_interval: 1.0
+  default_root_dir: "checkpoints"
+  log_grad_norm: false
+
+model:
+  d_model: 256
+  # -------- tree relative bias --------
+  use_tree_bias: true
+  tree_bias_num_buckets: 16
+  tree_bias_mode: full        # dist_only | type_only | full
+  tree_bias_layers: all       # all | last1
+  tree_bias_rel_set: core     # script | fraction | core
+  # -------- encoder --------
+  growth_rate: 24
+  num_layers: 16
+  reduction: 0.5
+  bottleneck: true
+  use_dropout: true
+  encoder_dropout: 0.2
+  # -------- decoder --------
+  nhead: 8
+  num_decoder_layers: 3
+  dim_feedforward: 1024
+  decoder_dropout: 0.3
+  dc: 32
+  cross_coverage: true
+  self_coverage: true
+  # -------- beam search --------
+  beam_size: 10
+  max_len: 200
+  alpha: 1.0
+  early_stopping: false
+  temperature: 1.0
+  # -------- training --------
+  optimizer:
+    use: SGD # SGD, Adam, AdamW, Adadelta
+    # init for SGD
+    SGD:
+      lr: 0.24
+      momentum: 0.9
+      weight_decay: 0.0001
+    # init for Adam
+    Adam:
+      lr: 0.12
+      betas: [0.9, 0.999]
+    # init for AdamW
+    AdamW:
+      lr: 0.12
+      betas: [0.9, 0.999]
+      weight_decay: 1e-4
+    # init for Adadelta
+    Adadelta:
+      lr: 1
+      weight_decay: 1e-4
+      epsilon: 1e-6
+
+  scheduler:
+    use: ReduceLROnPlateau # ReduceLROnPlateau
+    interval: epoch
+    monitor: val_ExpRate
+    # init for ReduceLROnPlateau
+    ReduceLROnPlateau:
+      mode: 'max'
+      factor: 0.25
+      patience: 12
+    warmup:
+      enabled: true
+      interval: "step"
+      epochs: 1
+      steps: 555
+
+data:
+  zipfile_path: crohme_data/data
+  test_year: '2014'
+  dictionary_txt: crohme_data/data/dictionary.txt
+  train_batch_size: 8
+  eval_batch_size: 4
+  num_workers: 4
+  scale_aug: false
+  cache_transforms: true
+
+  # Augmentation params
+  k_min: 0.7
+  k_max: 1.4
+  h_lo: 16
+  h_hi: 256
+  w_lo: 16
+  w_hi: 1024
+
+  # Memory control
+  max_pixels_per_batch: 1280000
+  pin_memory: true
+  persistent_workers: true
+  lazy_load: false
+  pad_strategy: "batch_max"
+
+wandb:
+  name: "CoMER"
+  project: "DSP391m_Group1_FALL25"
+  wandb_watch: false
+  wandb_watch_log: "gradients"
+  wandb_watch_log_freq: 1000
