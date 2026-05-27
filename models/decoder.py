@@ -135,7 +135,6 @@ class Decoder(DecodeModel):
             tgt_mask=tgt_mask,
             tgt_key_padding_mask=tgt_pad_mask,
             memory_key_padding_mask=src_mask,
-            rel_bias=rel_bias,
         )
 
         out = rearrange(out, "l b d -> b l d")
