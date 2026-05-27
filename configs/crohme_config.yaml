@@ -24,6 +24,7 @@ trainer:
   log_grad_norm: false
 
 model:
+  name: "PosFormer"
   d_model: 256
   # -------- encoder --------
   growth_rate: 24
@@ -46,6 +47,26 @@ model:
   alpha: 1.0
   early_stopping: false
   temperature: 1.0
+  # -------- PosFormer position branch --------
+  position:
+    enabled: true
+    label_depth: 5
+    num_layer_classes: 5
+    num_pos_classes: 6
+    embed_hidden_dim: null
+    mlp_hidden_dim: 128
+    dropout: 0.3
+    special_symbol_policy: "source_compatible"
+    aux_targets_from_batch: true
+  loss:
+    word_weight: 1.0
+    layer_weight: 0.25
+    pos_weight: 0.25
+    normalize_by_weight_sum: true
+    aux_ignore_index: null
+  implicit_attention_correction:
+    enabled: true
+    mask_tokens: ["{", "^", "_"]
   # -------- training --------
   optimizer:
     use: SGD # SGD, Adam, AdamW, Adadelta
@@ -110,7 +131,7 @@ data:
   pad_strategy: "batch_max"
 
 wandb:
-  name: "CoMER"
+  name: "PosFormer"
   project: "DSP391m_Group1_FALL25"
   wandb_watch: false
   wandb_watch_log: "gradients"

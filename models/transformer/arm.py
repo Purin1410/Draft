@@ -1,3 +1,5 @@
+from typing import Optional, Sequence
+
 import torch
 import torch.nn as nn
 from einops import rearrange, repeat
@@ -36,12 +38,25 @@ class MaskBatchNorm2d(nn.Module):
 
 
 class AttentionRefinementModule(nn.Module):
-    def __init__(self, nhead: int, dc: int, cross_coverage: bool, self_coverage: bool):
+    def __init__(
+        self,
+        nhead: int,
+        dc: int,
+        cross_coverage: bool,
+        self_coverage: bool,
+        coverage_mask_token_ids: Optional[Sequence[int]] = None,
+    ):
         super().__init__()
         assert cross_coverage or self_coverage
         self.nhead = nhead
         self.cross_coverage = cross_coverage
         self.self_coverage = self_coverage
+        token_ids = list(coverage_mask_token_ids or [])
+        self.register_buffer(
+            "coverage_mask_token_ids",
+            torch.tensor(token_ids, dtype=torch.long),
+            persistent=False,
+        )
 
         if cross_coverage and self_coverage:
             in_chs = 2 * nhead
@@ -55,7 +70,12 @@ class AttentionRefinementModule(nn.Module):
         self.post_norm = MaskBatchNorm2d(nhead)
 
     def forward(
-        self, prev_attn: Tensor, key_padding_mask: Tensor, h: int, curr_attn: Tensor
+        self,
+        prev_attn: Tensor,
+        key_padding_mask: Tensor,
+        h: int,
+        curr_attn: Tensor,
+        tgt_vocab: Optional[Tensor] = None,
     ) -> Tensor:
         """
         Parameters
@@ -83,6 +103,13 @@ class AttentionRefinementModule(nn.Module):
         if self.self_coverage:
             attns.append(curr_attn)
         attns = torch.cat(attns, dim=1)
+
+        if tgt_vocab is not None and self.coverage_mask_token_ids.numel() > 0:
+            mask_vocab = torch.ones_like(tgt_vocab, dtype=torch.bool)
+            for token_id in self.coverage_mask_token_ids.tolist():
+                mask_vocab &= tgt_vocab.ne(int(token_id))
+            mask_vocab = mask_vocab.unsqueeze(1).expand(-1, attns.shape[1], -1)
+            attns = attns * mask_vocab.unsqueeze(-1).to(attns.dtype)
 
         attns = attns.cumsum(dim=2) - attns
         attns = rearrange(attns, "b n t (h w) -> (b t) n h w", h=h)

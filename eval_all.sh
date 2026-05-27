@@ -2,7 +2,7 @@
 
 version=$1
 
-# install lgeval and tex2symlg (in CoMER folder)
+# install lgeval and tex2symlg (in PosFormer folder)
 export LgEvalDir=$(pwd)/lgeval
 export Convert2SymLGDir=$(pwd)/convert2symLG
 export PATH=$PATH:$LgEvalDir/bin:$Convert2SymLGDir

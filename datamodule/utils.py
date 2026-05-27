@@ -249,6 +249,9 @@ class Batch:
     indices: List[List[int]]  # [b, l]
     tgt: Optional[LongTensor] = None
     out: Optional[LongTensor] = None
+    pos_tgt: Optional[FloatTensor] = None
+    pos_layer: Optional[LongTensor] = None
+    pos_pos: Optional[LongTensor] = None
     labels: Optional[LongTensor] = None
     lengths: Optional[LongTensor] = None
 
@@ -263,6 +266,9 @@ class Batch:
             indices=self.indices,
             tgt=None if self.tgt is None else self.tgt.pin_memory(),
             out=None if self.out is None else self.out.pin_memory(),
+            pos_tgt=None if self.pos_tgt is None else self.pos_tgt.pin_memory(),
+            pos_layer=None if self.pos_layer is None else self.pos_layer.pin_memory(),
+            pos_pos=None if self.pos_pos is None else self.pos_pos.pin_memory(),
             labels=None if self.labels is None else self.labels.pin_memory(),
             lengths=None if self.lengths is None else self.lengths.pin_memory(),
         )
@@ -275,6 +281,9 @@ class Batch:
             indices=self.indices,
             tgt=None if self.tgt is None else self.tgt.to(device, non_blocking=non_blocking),
             out=None if self.out is None else self.out.to(device, non_blocking=non_blocking),
+            pos_tgt=None if self.pos_tgt is None else self.pos_tgt.to(device, non_blocking=non_blocking),
+            pos_layer=None if self.pos_layer is None else self.pos_layer.to(device, non_blocking=non_blocking),
+            pos_pos=None if self.pos_pos is None else self.pos_pos.to(device, non_blocking=non_blocking),
             labels=None if self.labels is None else self.labels.to(device, non_blocking=non_blocking),
             lengths=None if self.lengths is None else self.lengths.to(device, non_blocking=non_blocking),
         )

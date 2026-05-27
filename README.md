@@ -1,6 +1,6 @@
 <div align="center">    
  
-# CoMER: Modeling Coverage for Transformer-based Handwritten Mathematical Expression Recognition  
+# PosFormer: Position-Enhanced Transformer for Handwritten Mathematical Expression Recognition  
  
 [![arXiv](https://img.shields.io/badge/arXiv-2207.04410-b31b1b.svg)](https://arxiv.org/abs/2207.04410)
 
@@ -12,7 +12,7 @@
 ├── comer               # model definition folder
 ├── convert2symLG       # official tool to convert latex to symLG format
 ├── lgeval              # official tool to compare symLGs in two folder
-├── config.yaml         # config for CoMER hyperparameter
+├── configs             # PosFormer configs
 ├── data.zip
 ├── eval_all.sh         # script to evaluate model on all CROHME test sets
 ├── example
@@ -33,10 +33,10 @@
 
 ## Install dependencies   
 ```bash
-cd CoMER
+cd PosFormer
 # install project   
-conda create -y -n CoMER python=3.7
-conda activate CoMER
+conda create -y -n PosFormer python=3.7
+conda activate PosFormer
 conda install pytorch=1.8.1 torchvision=0.2.2 cudatoolkit=11.1 pillow=8.4.0 -c pytorch -c nvidia
 # training dependency
 conda install pytorch-lightning=1.4.9 torchmetrics=0.6.0 -c conda-forge
@@ -46,10 +46,10 @@ pip install -e .
  ```
 
 ## Training
-Next, navigate to CoMER folder and run `train.py`. It may take **7~8** hours on **4** NVIDIA 2080Ti gpus using ddp.
+Next, navigate to the PosFormer folder and run `train.py`.
 ```bash
-# train CoMER(Fusion) model using 4 gpus and ddp
-python train.py --config config.yaml  
+# train PosFormer model
+python train.py --config configs/crohme_config.yaml
 ```
 
 You may change the `config.yaml` file to train different models
@@ -58,15 +58,15 @@ You may change the `config.yaml` file to train different models
 cross_coverage: false
 self_coverage: false
 
-# train CoMER(Self) model
+# train PosFormer(Self) model
 cross_coverage: false
 self_coverage: true
 
-# train CoMER(Cross) model
+# train PosFormer(Cross) model
 cross_coverage: true
 self_coverage: false
 
-# train CoMER(Fusion) model
+# train PosFormer(Fusion) model
 cross_coverage: true
 self_coverage: true
 ```
@@ -83,7 +83,7 @@ Metrics used in validation during the training process is not accurate.
 
 For accurate metrics reported in the paper, please use tools officially provided by CROHME 2019 oganizer:
 
-A trained CoMER(Fusion) weight checkpoint has been saved in `lightning_logs/version_0`
+A trained PosFormer weight checkpoint can be evaluated from `lightning_logs/version_0`
 
 
 

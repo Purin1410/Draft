@@ -25,6 +25,7 @@ def _build_transformer_decoder(
     dc: int,
     cross_coverage: bool,
     self_coverage: bool,
+    coverage_mask_token_ids: Optional[List[int]] = None,
 ) -> nn.TransformerDecoder:
     decoder_layer = TransformerDecoderLayer(
         d_model=d_model,
@@ -33,7 +34,13 @@ def _build_transformer_decoder(
         dropout=dropout,
     )
     if cross_coverage or self_coverage:
-        arm = AttentionRefinementModule(nhead, dc, cross_coverage, self_coverage)
+        arm = AttentionRefinementModule(
+            nhead,
+            dc,
+            cross_coverage,
+            self_coverage,
+            coverage_mask_token_ids=coverage_mask_token_ids,
+        )
     else:
         arm = None
 
@@ -53,6 +60,7 @@ class Decoder(DecodeModel):
         cross_coverage: bool,
         self_coverage: bool,
         vocab_info: VocabInfo,
+        coverage_mask_token_ids: Optional[List[int]] = None,
     ):
         super().__init__()
         self.vocab_info = vocab_info
@@ -74,6 +82,7 @@ class Decoder(DecodeModel):
             dc=dc,
             cross_coverage=cross_coverage,
             self_coverage=self_coverage,
+            coverage_mask_token_ids=coverage_mask_token_ids,
         )
 
         self.proj = nn.Linear(d_model, vocab_info.vocab_size)
@@ -118,7 +127,8 @@ class Decoder(DecodeModel):
         B_tgt, l = tgt.size()
         tgt_mask = self._build_attention_mask(l)
         tgt_pad_mask = tgt == self.vocab_info.pad_id
-        
+        tgt_vocab = tgt
+
         tgt = self.word_embed(tgt)  # [b, l, d]
         tgt = self.pos_enc(tgt)  # [b, l, d]
         tgt = self.norm(tgt)
@@ -135,6 +145,7 @@ class Decoder(DecodeModel):
             tgt_mask=tgt_mask,
             tgt_key_padding_mask=tgt_pad_mask,
             memory_key_padding_mask=src_mask,
+            tgt_vocab=tgt_vocab,
         )
 
         out = rearrange(out, "l b d -> b l d")

@@ -6,7 +6,7 @@ from sconf import Config
 from tqdm import tqdm
 
 from datamodule import CROHMEDatamodule
-from lit_comer import LitCoMER
+from lit_posformer import LitPosFormer
 
 
 def main(config_path: str, ckp_path: str, output_zip: str = "result.zip"):
@@ -20,16 +20,17 @@ def main(config_path: str, ckp_path: str, output_zip: str = "result.zip"):
     # vocab_info is retrieved explicitly — no shared_vocab import side-effects
     vocab_info = dm.vocab.get_info()
 
-    model = LitCoMER.load_from_checkpoint(ckp_path, config=config, vocab_info=vocab_info)
+    model = LitPosFormer.load_from_checkpoint(ckp_path, config=config, vocab_info=vocab_info)
     model.eval()
-    model.cuda()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
 
     exprate_recorder = model.exprate_recorder
 
     with zipfile.ZipFile(output_zip, "w") as zip_f:
         with torch.inference_mode():
             for batch in tqdm(test_dataloader, desc="Testing"):
-                batch = batch.to("cuda", non_blocking=True)
+                batch = batch.to(device, non_blocking=True)
 
                 # Inference — no grad, no training state
                 hyps = model.approximate_joint_search(batch.imgs, batch.mask)

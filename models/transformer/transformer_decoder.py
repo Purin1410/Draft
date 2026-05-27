@@ -37,6 +37,7 @@ class TransformerDecoder(nn.Module):
         memory_mask: Optional[Tensor] = None,
         tgt_key_padding_mask: Optional[Tensor] = None,
         memory_key_padding_mask: Optional[Tensor] = None,
+        tgt_vocab: Optional[Tensor] = None,
     ) -> Tensor:
         output = tgt
 
@@ -50,6 +51,7 @@ class TransformerDecoder(nn.Module):
                 memory_mask=memory_mask,
                 tgt_key_padding_mask=tgt_key_padding_mask,
                 memory_key_padding_mask=memory_key_padding_mask,
+                tgt_vocab=tgt_vocab,
             )
             if i != len(self.layers) - 1 and self.arm is not None:
                 arm = partial(self.arm, attn, memory_key_padding_mask, height)
@@ -96,6 +98,7 @@ class TransformerDecoderLayer(nn.Module):
         memory_mask: Optional[Tensor] = None,
         tgt_key_padding_mask: Optional[Tensor] = None,
         memory_key_padding_mask: Optional[Tensor] = None,
+        tgt_vocab: Optional[Tensor] = None,
     ) -> Tensor:
         r"""Pass the inputs (and mask) through the decoder layer.
 
@@ -124,6 +127,7 @@ class TransformerDecoderLayer(nn.Module):
             arm=arm,
             attn_mask=memory_mask,
             key_padding_mask=memory_key_padding_mask,
+            tgt_vocab=tgt_vocab,
         )
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)

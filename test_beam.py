@@ -1,5 +1,5 @@
 """
-test_beam.py — Restored smoke tests for CoMER pipeline.
+test_beam.py — Restored smoke tests for PosFormer pipeline.
 
 Tests call restored full-prefix beam search behavior.
 No dataset, checkpoint, or GPU required.

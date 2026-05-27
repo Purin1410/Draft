@@ -5,16 +5,16 @@ import pytorch_lightning as pl
 import torch.optim as optim
 from torch import FloatTensor, LongTensor
 import torch
+import torch.nn.functional as F
 
-from datamodule.datamodule import CROHMEDatamodule
 from datamodule.utils import Batch
-from datamodule.vocab import VocabInfo
 
-from models.comer import CoMER
-from utils.utils import (ExpRateRecorder, Hypothesis, ce_loss, to_tgt_output)
+from models import posformer as posformer_module
+from utils.utils import ExpRateRecorder, Hypothesis, ce_loss
+from utils.vocab_info import VocabInfo
 
 
-class LitCoMER(pl.LightningModule):
+class LitPosFormer(pl.LightningModule):
     def __init__(
         self,
         config: Dict[str, Any],
@@ -33,7 +33,7 @@ class LitCoMER(pl.LightningModule):
         
 
         # model
-        self.comer_model = CoMER(config, vocab_info=vocab_info)
+        self.posformer_model = posformer_module.PosFormer(config, vocab_info=vocab_info)
         #- -------------------------Optimizer config---------------------------------
         self.optimizer_cfg = mcfg.get("optimizer", {})
         self.optimizer_use = self.optimizer_cfg.get("use", "SGD")
@@ -55,13 +55,21 @@ class LitCoMER(pl.LightningModule):
         self._warmup_total_steps = None
         self._warmup_finished = not self.warmup_enabled
         self._plateau_scheduler = None
+        self.loss_cfg = mcfg.get("loss", {})
+        self.word_weight = float(self.loss_cfg.get("word_weight", 1.0))
+        self.layer_weight = float(self.loss_cfg.get("layer_weight", 0.25))
+        self.pos_weight = float(self.loss_cfg.get("pos_weight", 0.25))
+        self.normalize_by_weight_sum = bool(
+            self.loss_cfg.get("normalize_by_weight_sum", True)
+        )
 
     def forward(
         self,
         img: FloatTensor,
         img_mask: LongTensor,
         tgt: LongTensor,
-    ) -> FloatTensor:
+        pos_tgt: FloatTensor = None,
+    ):
         """run img and bi-tgt
 
         Parameters
@@ -78,23 +86,57 @@ class LitCoMER(pl.LightningModule):
         FloatTensor
             [2b, l, vocab_size]
         """
-        return self.comer_model(img, img_mask, tgt)
+        return self.posformer_model(img, img_mask, tgt, pos_tgt)
 
     def training_step(self, batch: Batch, _):
-        out_hat = self(batch.imgs, batch.mask, batch.tgt)
+        word_logits, layer_logits, pos_logits = self(
+            batch.imgs, batch.mask, batch.tgt, batch.pos_tgt
+        )
 
-        loss = ce_loss(out_hat, batch.out, ignore_idx=self.vocab_info.pad_id)
+        loss, word_loss, layer_loss, pos_loss = self._compute_loss(
+            word_logits, layer_logits, pos_logits, batch
+        )
         self.log("train_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train_loss_word", word_loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train_loss_layernum", layer_loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train_loss_pos", pos_loss, on_step=False, on_epoch=True, sync_dist=True)
 
         return loss
 
     def validation_step(self, batch: Batch, _):
-        out_hat = self(batch.imgs, batch.mask, batch.tgt)
+        word_logits, layer_logits, pos_logits = self(
+            batch.imgs, batch.mask, batch.tgt, batch.pos_tgt
+        )
 
-        loss = ce_loss(out_hat, batch.out, ignore_idx=self.vocab_info.pad_id)
+        loss, word_loss, layer_loss, pos_loss = self._compute_loss(
+            word_logits, layer_logits, pos_logits, batch
+        )
         self.log(
             "val_loss",
             loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+        self.log(
+            "val_loss_word",
+            word_loss,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
+        self.log(
+            "val_loss_layernum",
+            layer_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+        self.log(
+            "val_loss_pos",
+            pos_loss,
             on_step=False,
             on_epoch=True,
             prog_bar=True,
@@ -112,6 +154,38 @@ class LitCoMER(pl.LightningModule):
             on_epoch=True,
             sync_dist=True,
         )
+
+    def _compute_loss(self, word_logits, layer_logits, pos_logits, batch: Batch):
+        word_loss = ce_loss(word_logits, batch.out, ignore_idx=self.vocab_info.pad_id)
+        if layer_logits is None or pos_logits is None:
+            return word_loss, word_loss, word_loss.detach() * 0, word_loss.detach() * 0
+        if batch.pos_layer is None or batch.pos_pos is None:
+            raise ValueError("Batch is missing PosFormer auxiliary targets.")
+
+        valid_mask = batch.out.ne(self.vocab_info.pad_id)
+        layer_raw = F.cross_entropy(
+            layer_logits.transpose(1, 2),
+            batch.pos_layer,
+            reduction="none",
+        )
+        pos_raw = F.cross_entropy(
+            pos_logits.transpose(1, 2),
+            batch.pos_pos,
+            reduction="none",
+        )
+        layer_loss = layer_raw[valid_mask].mean()
+        pos_loss = pos_raw[valid_mask].mean()
+
+        loss = (
+            self.word_weight * word_loss
+            + self.layer_weight * layer_loss
+            + self.pos_weight * pos_loss
+        )
+        if self.normalize_by_weight_sum:
+            weight_sum = self.word_weight + self.layer_weight + self.pos_weight
+            if weight_sum > 0:
+                loss = loss / weight_sum
+        return loss, word_loss, layer_loss, pos_loss
     
     def on_fit_start(self):
         self._init_warmup_if_needed()
@@ -290,7 +364,7 @@ class LitCoMER(pl.LightningModule):
         self.log("lr_after_plateau", float(new_lr), on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
     
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        checkpoint["lit_comer_warmup_state"] = {
+        checkpoint["lit_posformer_warmup_state"] = {
             "target_lrs": self._target_lrs,
             "warmup_total_steps": self._warmup_total_steps,
             "warmup_finished": self._warmup_finished,
@@ -302,7 +376,10 @@ class LitCoMER(pl.LightningModule):
         }
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        state = checkpoint.get("lit_comer_warmup_state", {})
+        state = checkpoint.get(
+            "lit_posformer_warmup_state",
+            checkpoint.get("lit_comer_warmup_state", {}),
+        )
         self._target_lrs = state.get("target_lrs", self._target_lrs)
         self._warmup_total_steps = state.get("warmup_total_steps", self._warmup_total_steps)
         self._warmup_finished = state.get("warmup_finished", self._warmup_finished)
@@ -313,7 +390,7 @@ class LitCoMER(pl.LightningModule):
         img: FloatTensor, 
         mask: LongTensor,
     ) -> List[Hypothesis]:
-        return self.comer_model.beam_search(img, mask, **self.hparams)
+        return self.posformer_model.beam_search(img, mask, **self.hparams)
 
     def configure_optimizers(self):
         name = self.optimizer_use

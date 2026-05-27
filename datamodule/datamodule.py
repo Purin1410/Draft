@@ -8,6 +8,10 @@ from .utils import (build_train_dataset,
 from .vocab import Vocab
 from .utils import Batch
 import torch
+from utils.position_labels import (
+    build_position_targets_from_padded,
+    make_position_token_ids,
+)
 
 class CROHMEDatamodule(pl.LightningDataModule):
     # shared_vocab is a class-level cache kept for backward compatibility.
@@ -43,6 +47,15 @@ class CROHMEDatamodule(pl.LightningDataModule):
         if CROHMEDatamodule.shared_vocab is None:
             CROHMEDatamodule.shared_vocab = Vocab(dict_path=data_config.dictionary_txt)
         self.vocab = CROHMEDatamodule.shared_vocab        
+        model_config = self.config.get("model", {})
+        position_config = model_config.get("position", {})
+        self.position_enabled = bool(position_config.get("enabled", True))
+        self.position_label_depth = int(position_config.get("label_depth", 5))
+        self.position_token_ids = (
+            make_position_token_ids(self.vocab.get_info())
+            if self.position_enabled
+            else None
+        )
         self.train_batch_sampler = None
         self.val_batch_sampler = None
         self.test_batch_sampler = None
@@ -97,6 +110,17 @@ class CROHMEDatamodule(pl.LightningDataModule):
             eos_id=self.vocab.EOS_IDX,
             pad_id=self.vocab.PAD_IDX,
         )
+        position_targets = None
+        if self.position_enabled:
+            position_targets = build_position_targets_from_padded(
+                labels=labels,
+                lengths=lengths,
+                token_ids=self.position_token_ids,
+                sos_id=self.vocab.SOS_IDX,
+                eos_id=self.vocab.EOS_IDX,
+                pad_id=self.vocab.PAD_IDX,
+                label_depth=self.position_label_depth,
+            )
 
         return Batch(
             img_bases=fnames,
@@ -105,6 +129,9 @@ class CROHMEDatamodule(pl.LightningDataModule):
             indices=seqs_y,
             tgt=tgt,
             out=out,
+            pos_tgt=None if position_targets is None else position_targets.pos_tgt,
+            pos_layer=None if position_targets is None else position_targets.pos_layer,
+            pos_pos=None if position_targets is None else position_targets.pos_pos,
             labels=labels,
             lengths=lengths,
         )
