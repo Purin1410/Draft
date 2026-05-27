@@ -24,7 +24,6 @@ trainer:
   log_grad_norm: false
 
 model:
-  name: "ICAL"
   d_model: 256
   # -------- encoder --------
   growth_rate: 24
@@ -90,7 +89,7 @@ model:
     ReduceLROnPlateau:
       mode: 'max'
       factor: 0.25
-      patience: 12
+      patience: 6
     warmup:
       enabled: true
       interval: "step"
