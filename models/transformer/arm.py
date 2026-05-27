@@ -105,12 +105,13 @@ class AttentionRefinementModule(nn.Module):
         attns = torch.cat(attns, dim=1)
 
         if tgt_vocab is not None and self.coverage_mask_token_ids.numel() > 0:
-            mask_vocab = torch.ones_like(tgt_vocab, dtype=torch.bool)
+            # mask_vocab = torch.ones_like(tgt_vocab, dtype=torch.bool)
             # for token_id in self.coverage_mask_token_ids.tolist():
             #     mask_vocab &= tgt_vocab.ne(int(token_id))
             # mask_vocab = mask_vocab.unsqueeze(1).expand(-1, attns.shape[1], -1)
-            ids = self.coverage_mask_token_ids.to(tgt_vocab.device)
             mask_vocab = (tgt_vocab.unsqueeze(-1) != ids.view(1, 1, -1)).all(dim=-1)
+            ids = self.coverage_mask_token_ids.to(tgt_vocab.device)
+            mask_vocab = mask_vocab.unsqueeze(1).expand(-1, attns.shape[1], -1)
             attns = attns * mask_vocab.unsqueeze(-1).to(attns.dtype)
 
         attns = attns.cumsum(dim=2) - attns
