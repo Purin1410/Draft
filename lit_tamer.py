@@ -8,7 +8,7 @@ import torch
 
 from datamodule.datamodule import CROHMEDatamodule
 from datamodule.utils import Batch
-from datamodule.vocab import VocabInfo
+from utils.vocab_info import VocabInfo
 
 from models.tamer import TAMER
 from utils.utils import (
@@ -383,19 +383,29 @@ class LitTAMER(pl.LightningModule):
     def _struct_loss(self, struct_logits, batch: Batch) -> torch.Tensor:
         if not self.struct_loss_enabled:
             return torch.zeros((), dtype=torch.float, device=self.device)
+
         if struct_logits is None:
             raise RuntimeError(
                 "model.tamer.struct_loss.enabled=true requires "
                 "model.tamer.struct_head.enabled=true"
             )
+
         struct_out, _ = self._get_struct_targets(batch)
         if struct_out is None:
             raise RuntimeError("Structural loss is enabled but no structural targets exist.")
-        return ce_loss(
+
+        valid = struct_out != self.struct_ignore_index
+        if not valid.any():
+            return struct_logits.sum() * 0.0
+
+        # Optional: reduction none để tự average trên valid, tránh edge-case mean.
+        flat_loss = ce_loss(
             struct_logits,
             struct_out,
             ignore_idx=self.struct_ignore_index,
+            reduction="none",
         )
+        return flat_loss[valid.reshape(-1)].mean()
 
     def _log_illegal_struct_rate(self, batch: Batch, stage: str) -> None:
         if not self.log_illegal_struct_rate:

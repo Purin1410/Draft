@@ -1,6 +1,7 @@
 from .utils import Hypothesis, ce_loss, to_tgt_output, to_bi_tgt_out, to_bi_tgt_out_from_padded
 from .generation_utils import DecodeModel, _strip_generated_boundaries_cpu
 from .beam_search import BeamSearchScorer, BeamHypotheses
+from .utils import to_struct_output_from_labels
 
 __all__ = [
     "Hypothesis",
@@ -12,5 +13,6 @@ __all__ = [
     "_strip_generated_boundaries_cpu",
     "BeamSearchScorer",
     "BeamHypotheses",
+    "to_struct_output_from_labels"
 ]
-
+
