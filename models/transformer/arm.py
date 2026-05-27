@@ -51,7 +51,9 @@ class AttentionRefinementModule(nn.Module):
         self.nhead = nhead
         self.cross_coverage = cross_coverage
         self.self_coverage = self_coverage
-        token_ids = list(coverage_mask_token_ids or [])
+        token_ids = tuple(int(x) for x in (coverage_mask_token_ids or ()))
+        self.coverage_mask_token_id_tuple = token_ids
+
         self.register_buffer(
             "coverage_mask_token_ids",
             torch.tensor(token_ids, dtype=torch.long),
@@ -104,15 +106,27 @@ class AttentionRefinementModule(nn.Module):
             attns.append(curr_attn)
         attns = torch.cat(attns, dim=1)
 
-        if tgt_vocab is not None and self.coverage_mask_token_ids.numel() > 0:
-            # mask_vocab = torch.ones_like(tgt_vocab, dtype=torch.bool)
-            # for token_id in self.coverage_mask_token_ids.tolist():
-            #     mask_vocab &= tgt_vocab.ne(int(token_id))
-            # mask_vocab = mask_vocab.unsqueeze(1).expand(-1, attns.shape[1], -1)
-            mask_vocab = (tgt_vocab.unsqueeze(-1) != ids.view(1, 1, -1)).all(dim=-1)
-            ids = self.coverage_mask_token_ids.to(tgt_vocab.device)
-            mask_vocab = mask_vocab.unsqueeze(1).expand(-1, attns.shape[1], -1)
-            attns = attns * mask_vocab.unsqueeze(-1).to(attns.dtype)
+        if tgt_vocab is not None and self.coverage_mask_token_id_tuple:
+            # Expected:
+            #   tgt_vocab: [B, T]
+            #   attns:     [B, N, T, HW]
+            if tgt_vocab.dim() != 2:
+                raise RuntimeError(
+                    f"Expected tgt_vocab shape [B, T], got {tuple(tgt_vocab.shape)}"
+                )
+            if tgt_vocab.size(0) != attns.size(0) or tgt_vocab.size(1) != attns.size(2):
+                raise RuntimeError(
+                    "tgt_vocab/attns shape mismatch: "
+                    f"tgt_vocab={tuple(tgt_vocab.shape)}, attns={tuple(attns.shape)}. "
+                    "Expected tgt_vocab=[B,T] and attns=[B,N,T,HW]."
+                )
+
+            mask_vocab = torch.ones_like(tgt_vocab, dtype=torch.bool, device=tgt_vocab.device)
+            for token_id in self.coverage_mask_token_id_tuple:
+                mask_vocab &= tgt_vocab.ne(token_id)
+
+            # [B, T] -> [B, 1, T, 1], broadcast over attention heads and image positions
+            attns = attns.masked_fill(~mask_vocab[:, None, :, None], 0.0)
 
         attns = attns.cumsum(dim=2) - attns
         attns = rearrange(attns, "b n t (h w) -> (b t) n h w", h=h)
