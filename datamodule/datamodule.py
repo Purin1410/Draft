@@ -40,6 +40,13 @@ class CROHMEDatamodule(pl.LightningDataModule):
         self.h_hi                       = data_config.h_hi
         self.pin_memory                 = data_config.pin_memory
         self.persistent_workers         = data_config.persistent_workers
+        tamer_cfg                       = self.config.model.get("tamer", {})
+        struct_loss_cfg                 = tamer_cfg.get("struct_loss", {})
+        self.struct_loss_enabled        = bool(struct_loss_cfg.get("enabled", False))
+        self.precompute_struct_in_collate = bool(
+            struct_loss_cfg.get("precompute_in_collate", True)
+        )
+        self.struct_ignore_index        = int(struct_loss_cfg.get("ignore_index", -1))
         if CROHMEDatamodule.shared_vocab is None:
             CROHMEDatamodule.shared_vocab = Vocab(dict_path=data_config.dictionary_txt)
         self.vocab = CROHMEDatamodule.shared_vocab        
@@ -67,7 +74,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
             x[idx, :, : heights_x[idx], : widths_x[idx]] = s_x
             x_mask[idx, : heights_x[idx], : widths_x[idx]] = 0
 
-        from utils.utils import to_bi_tgt_out_from_padded
+        from utils.utils import to_bi_tgt_out_from_padded, to_struct_output_from_labels
         
         lengths_x = [len(s) for s in seqs_y]
         max_len = max(lengths_x) if len(lengths_x) > 0 else 0
@@ -83,6 +90,16 @@ class CROHMEDatamodule(pl.LightningDataModule):
             eos_id=self.vocab.EOS_IDX,
             pad_id=self.vocab.PAD_IDX,
         )
+        struct_out = None
+        struct_illegal = None
+        if self.struct_loss_enabled and self.precompute_struct_in_collate:
+            struct_out, struct_illegal = to_struct_output_from_labels(
+                labels=labels,
+                lengths=lengths,
+                device=torch.device("cpu"),
+                vocab_info=self.vocab.get_info(),
+                ignore_index=self.struct_ignore_index,
+            )
 
         return Batch(
             img_bases=fnames,
@@ -93,6 +110,8 @@ class CROHMEDatamodule(pl.LightningDataModule):
             out=out,
             labels=labels,
             lengths=lengths,
+            struct_out=struct_out,
+            struct_illegal=struct_illegal,
         )
 
         

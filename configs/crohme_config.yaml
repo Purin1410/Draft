@@ -46,6 +46,27 @@ model:
   alpha: 1.0
   early_stopping: false
   temperature: 1.0
+  # -------- TAMER structure supervision / tree rescoring --------
+  tamer:
+    struct_head:
+      enabled: true
+      nhead: 8
+      num_layers: 1
+      dim_feedforward: 1024
+      dropout: 0.3
+    struct_loss:
+      enabled: true
+      weight: 1.0
+      ignore_index: -1
+      precompute_in_collate: true
+    tree_rescore:
+      enabled: true
+      weight: 1.0
+      illegal_score: -inf
+      start_epoch: 0
+      ignore_index: -1
+    debug:
+      log_illegal_struct_rate: true
   # -------- training --------
   optimizer:
     use: SGD # SGD, Adam, AdamW, Adadelta
@@ -67,7 +88,7 @@ model:
     Adadelta:
       lr: 1
       weight_decay: 1e-4
-      epsilon: 1e-6
+      eps: 1e-6
 
   scheduler:
     use: ReduceLROnPlateau # ReduceLROnPlateau
@@ -77,7 +98,7 @@ model:
     ReduceLROnPlateau:
       mode: 'max'
       factor: 0.25
-      patience: 12
+      patience: 6
     warmup:
       enabled: true
       interval: "step"
@@ -109,7 +130,7 @@ data:
   lazy_load: false
 
 wandb:
-  name: "CoMER"
+  name: "TAMER"
   project: "DSP391m_Group1_FALL25"
   wandb_watch: false
   wandb_watch_log: "gradients"

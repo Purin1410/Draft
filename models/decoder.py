@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import torch
@@ -14,6 +15,12 @@ from .transformer.transformer_decoder import (
     TransformerDecoderLayer,
 )
 from utils.generation_utils import DecodeModel
+
+
+@dataclass
+class TAMERDecoderOutput:
+    logits: FloatTensor
+    struct_logits: Optional[FloatTensor] = None
 
 
 def _build_transformer_decoder(
@@ -53,9 +60,15 @@ class Decoder(DecodeModel):
         cross_coverage: bool,
         self_coverage: bool,
         vocab_info: VocabInfo,
+        struct_head_enabled: bool = False,
+        struct_nhead: int = 8,
+        struct_num_layers: int = 1,
+        struct_dim_feedforward: int = 1024,
+        struct_dropout: float = 0.3,
     ):
         super().__init__()
         self.vocab_info = vocab_info
+        self.struct_head_enabled = struct_head_enabled
 
         self.word_embed = nn.Sequential(
             nn.Embedding(vocab_info.vocab_size, d_model), nn.LayerNorm(d_model)
@@ -77,6 +90,17 @@ class Decoder(DecodeModel):
         )
 
         self.proj = nn.Linear(d_model, vocab_info.vocab_size)
+        self.struct_sim = (
+            StructSim(
+                d_model=d_model,
+                nhead=struct_nhead,
+                num_layers=struct_num_layers,
+                dim_feedforward=struct_dim_feedforward,
+                dropout=struct_dropout,
+            )
+            if struct_head_enabled
+            else None
+        )
 
         self._causal_mask_cache = {}
 
@@ -98,7 +122,7 @@ class Decoder(DecodeModel):
 
     def forward(
         self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor
-    ) -> FloatTensor:
+    ) -> TAMERDecoderOutput:
         """generate output for tgt
 
         Parameters
@@ -128,7 +152,7 @@ class Decoder(DecodeModel):
         src_mask = rearrange(src_mask, "b h w -> b (h w)")
         tgt = rearrange(tgt, "b l d -> l b d")
 
-        out = self.model(
+        hidden = self.model(
             tgt=tgt,
             memory=src,
             height=h,
@@ -137,15 +161,88 @@ class Decoder(DecodeModel):
             memory_key_padding_mask=src_mask,
         )
 
-        out = rearrange(out, "l b d -> b l d")
-        out = self.proj(out)
+        struct_logits = (
+            self.struct_sim(hidden, tgt_pad_mask)
+            if self.struct_sim is not None
+            else None
+        )
+        out = rearrange(hidden, "l b d -> b l d")
+        logits = self.proj(out)
 
-        return out
+        return TAMERDecoderOutput(logits=logits, struct_logits=struct_logits)
 
 
     def transform(
         self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor
     ) -> FloatTensor:
         assert len(src) == 1 and len(src_mask) == 1
+        return self(src[0], src_mask[0], input_ids).logits
+
+    def transform_with_struct(
+        self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor
+    ) -> TAMERDecoderOutput:
+        assert len(src) == 1 and len(src_mask) == 1
         return self(src[0], src_mask[0], input_ids)
+
+
+class StructSimOneDir(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        num_layers: int,
+        dim_feedforward: int,
+        dropout: float,
+    ):
+        super().__init__()
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+        )
+        self.trm = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.to_q = nn.Linear(d_model, d_model)
+        self.to_k = nn.Linear(d_model, d_model)
+        self.to_sim = nn.Sequential(nn.ReLU(inplace=True), nn.Linear(d_model, 1))
+
+    def forward(self, tgt: FloatTensor, tgt_key_padding_mask: LongTensor) -> FloatTensor:
+        tgt = self.trm(src=tgt, src_key_padding_mask=tgt_key_padding_mask)
+        q = rearrange(self.to_q(tgt), "t b d -> b t () d")
+        k = rearrange(self.to_k(tgt), "l b d -> b () l d")
+        sim = self.to_sim(q + k).squeeze(-1)
+        return sim.masked_fill(tgt_key_padding_mask[:, None, :], float("-inf"))
+
+
+class StructSim(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        num_layers: int,
+        dim_feedforward: int,
+        dropout: float,
+    ):
+        super().__init__()
+        self.l2r_struct_sim = StructSimOneDir(
+            d_model=d_model,
+            nhead=nhead,
+            num_layers=num_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+        )
+        self.r2l_struct_sim = StructSimOneDir(
+            d_model=d_model,
+            nhead=nhead,
+            num_layers=num_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+        )
+
+    def forward(self, out: FloatTensor, tgt_key_padding_mask: LongTensor) -> FloatTensor:
+        l2r_out, r2l_out = torch.chunk(out, 2, dim=1)
+        l2r_mask, r2l_mask = torch.chunk(tgt_key_padding_mask, 2, dim=0)
+        l2r_sim = self.l2r_struct_sim(l2r_out, l2r_mask)
+        r2l_sim = self.r2l_struct_sim(r2l_out, r2l_mask)
+        return torch.cat((l2r_sim, r2l_sim), dim=0)
 

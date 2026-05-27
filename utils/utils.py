@@ -5,6 +5,8 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import LongTensor
 from torchmetrics import Metric
+from utils.latex2gtd import safe_to_struct
+from utils.vocab_info import VocabInfo
 
 
 class Hypothesis:
@@ -242,3 +244,97 @@ def to_bi_tgt_out_from_padded(
     tgt = torch.cat((l2r_tgt, r2l_tgt), dim=0)
     out = torch.cat((l2r_out, r2l_out), dim=0)
     return tgt, out
+
+
+def _tokens_to_lists(tokens: Union[List[List[int]], List[LongTensor]]) -> List[List[int]]:
+    if len(tokens) == 0:
+        return []
+    if isinstance(tokens[0], torch.Tensor):
+        return [t.detach().cpu().tolist() for t in tokens]
+    return [list(t) for t in tokens]
+
+
+def to_struct_output(
+    tokens: Union[List[List[int]], List[LongTensor]],
+    device: torch.device,
+    vocab_info: VocabInfo,
+    pad_to_len: Optional[int] = None,
+    ignore_index: int = -1,
+) -> Tuple[LongTensor, torch.BoolTensor]:
+    """Build bidirectional structural parent targets from token ids.
+
+    ``struct_out`` is shaped ``[2B, L + 1]`` and aligns with decoder sequence
+    outputs. The extra position supervises the terminal token to point at the
+    final real token, matching TAMER's reference training target.
+    """
+    indices = _tokens_to_lists(tokens)
+    if len(indices) == 0:
+        empty = torch.empty((0, 0), dtype=torch.long, device=device)
+        return empty, torch.empty((0,), dtype=torch.bool, device=device)
+
+    structs: List[List[int]] = []
+    illegal: List[bool] = []
+    for seq in indices:
+        try:
+            words = vocab_info.words.indices2words(seq)
+            struct, is_illegal = safe_to_struct(words)
+        except Exception:
+            struct, is_illegal = [ignore_index for _ in seq], True
+        structs.append(struct)
+        illegal.append(is_illegal)
+
+    batch_size = len(structs)
+    lens = [len(struct) for struct in structs]
+    length = (max(lens) if lens else 0) + 1
+    if pad_to_len is not None:
+        length = max(length, int(pad_to_len))
+
+    l2r_out = torch.full(
+        (batch_size, length), fill_value=ignore_index, dtype=torch.long, device=device
+    )
+    r2l_out = torch.full(
+        (batch_size, length), fill_value=ignore_index, dtype=torch.long, device=device
+    )
+
+    for i, struct in enumerate(structs):
+        seq_len = lens[i]
+        if seq_len == 0 or illegal[i]:
+            continue
+        l2r_out[i, :seq_len] = torch.tensor(struct, dtype=torch.long, device=device)
+        l2r_out[i, seq_len] = seq_len - 1
+
+        reversed_struct = [
+            seq_len - parent - 1 if parent != ignore_index else ignore_index
+            for parent in reversed(struct)
+        ]
+        r2l_out[i, :seq_len] = torch.tensor(
+            reversed_struct, dtype=torch.long, device=device
+        )
+        r2l_out[i, seq_len] = seq_len - 1
+
+    out = torch.cat((l2r_out, r2l_out), dim=0)
+    illegal_tensor = torch.tensor(illegal, dtype=torch.bool, device=device)
+    return out, illegal_tensor
+
+
+def to_struct_output_from_labels(
+    labels: LongTensor,
+    lengths: LongTensor,
+    device: torch.device,
+    vocab_info: VocabInfo,
+    ignore_index: int = -1,
+) -> Tuple[LongTensor, torch.BoolTensor]:
+    """Build structural targets from padded label tensors."""
+    label_cpu = labels.detach().cpu()
+    length_cpu = lengths.detach().cpu()
+    tokens = [
+        label_cpu[i, : int(length_cpu[i].item())].tolist()
+        for i in range(label_cpu.shape[0])
+    ]
+    return to_struct_output(
+        tokens=tokens,
+        device=device,
+        vocab_info=vocab_info,
+        pad_to_len=labels.shape[1] + 1,
+        ignore_index=ignore_index,
+    )

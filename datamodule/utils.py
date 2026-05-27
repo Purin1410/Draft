@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Sequence, Optional
 import numpy as np
 from PIL import Image
-from torch import FloatTensor, LongTensor
+from torch import BoolTensor, FloatTensor, LongTensor
 from pathlib import Path
 
 # ---------------------------------------------------------------------
@@ -251,6 +251,8 @@ class Batch:
     out: Optional[LongTensor] = None
     labels: Optional[LongTensor] = None
     lengths: Optional[LongTensor] = None
+    struct_out: Optional[LongTensor] = None
+    struct_illegal: Optional[BoolTensor] = None
 
     def __len__(self) -> int:
         return len(self.img_bases)
@@ -265,6 +267,8 @@ class Batch:
             out=None if self.out is None else self.out.pin_memory(),
             labels=None if self.labels is None else self.labels.pin_memory(),
             lengths=None if self.lengths is None else self.lengths.pin_memory(),
+            struct_out=None if self.struct_out is None else self.struct_out.pin_memory(),
+            struct_illegal=None if self.struct_illegal is None else self.struct_illegal.pin_memory(),
         )
 
     def to(self, device, non_blocking=True) -> "Batch":
@@ -277,4 +281,6 @@ class Batch:
             out=None if self.out is None else self.out.to(device, non_blocking=non_blocking),
             labels=None if self.labels is None else self.labels.to(device, non_blocking=non_blocking),
             lengths=None if self.lengths is None else self.lengths.to(device, non_blocking=non_blocking),
+            struct_out=None if self.struct_out is None else self.struct_out.to(device, non_blocking=non_blocking),
+            struct_illegal=None if self.struct_illegal is None else self.struct_illegal.to(device, non_blocking=non_blocking),
         )

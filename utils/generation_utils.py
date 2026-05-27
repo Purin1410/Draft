@@ -4,12 +4,22 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .utils import Hypothesis, ce_loss, to_tgt_output
+from .utils import Hypothesis, ce_loss, to_struct_output, to_tgt_output
 from einops import rearrange
 from einops.einops import repeat
 from torch import FloatTensor, LongTensor
 from utils.vocab_info import VocabInfo
 from .beam_search import BeamSearchScorer
+
+
+def _as_score_value(value):
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered == "-inf":
+            return float("-inf")
+        if lowered == "inf":
+            return float("inf")
+    return float(value)
 
 
 # modified from
@@ -100,6 +110,8 @@ class DecodeModel(nn.Module):
         alpha: float,
         early_stopping: bool,
         temperature: float,
+        tree_rescore_cfg: Optional[Dict] = None,
+        current_epoch: int = 0,
     ) -> List[Hypothesis]:
         """run beam search to decode
 
@@ -180,6 +192,17 @@ class DecodeModel(nn.Module):
         )
         scores = scores + rev_scores
 
+        if self._tree_rescore_enabled(tree_rescore_cfg, current_epoch):
+            scores = self._apply_tree_rescore(
+                scores=scores,
+                hyps=hyps,
+                src=src,
+                src_mask=src_mask,
+                alpha=alpha,
+                temperature=temperature,
+                tree_rescore_cfg=tree_rescore_cfg or {},
+            )
+
         # [2 * b, beam_size]
         scores = rearrange(scores, "(b m) -> b m", b=batch_size)
         l2r_scores, r2l_scores = torch.chunk(scores, 2, dim=0)
@@ -205,6 +228,80 @@ class DecodeModel(nn.Module):
             hpy = Hypothesis(hyps[idx].cpu(), score, "l2r")
             ret.append(hpy)
         return ret
+
+    def _tree_rescore_enabled(self, cfg: Optional[Dict], current_epoch: int) -> bool:
+        if not cfg or not bool(cfg.get("enabled", False)):
+            return False
+        start_epoch = int(cfg.get("start_epoch", 0))
+        return int(current_epoch) >= start_epoch
+
+    def _apply_tree_rescore(
+        self,
+        scores: FloatTensor,
+        hyps: List[LongTensor],
+        src: List[FloatTensor],
+        src_mask: List[LongTensor],
+        alpha: float,
+        temperature: float,
+        tree_rescore_cfg: Dict,
+    ) -> FloatTensor:
+        if not hasattr(self, "transform_with_struct"):
+            return scores
+
+        lens = [len(h) + 1 for h in hyps]
+        max_len = max(lens) if lens else 0
+        l2r_tgt, _ = to_tgt_output(
+            hyps,
+            "l2r",
+            self.device,
+            self.vocab_info.sos_id,
+            self.vocab_info.eos_id,
+            self.vocab_info.pad_id,
+            pad_to_len=max_len,
+        )
+        r2l_tgt, _ = to_tgt_output(
+            hyps,
+            "r2l",
+            self.device,
+            self.vocab_info.sos_id,
+            self.vocab_info.eos_id,
+            self.vocab_info.pad_id,
+            pad_to_len=max_len,
+        )
+        tgt = torch.cat((l2r_tgt, r2l_tgt), dim=0)
+        repeated_src = [src[0].repeat(2, 1, 1, 1)]
+        repeated_mask = [src_mask[0].repeat(2, 1, 1)]
+        output = self.transform_with_struct(repeated_src, repeated_mask, tgt)
+        if output.struct_logits is None:
+            return scores
+
+        ignore_index = int(tree_rescore_cfg.get("ignore_index", -1))
+        struct_out, illegal = to_struct_output(
+            hyps,
+            device=self.device,
+            vocab_info=self.vocab_info,
+            pad_to_len=tgt.shape[1],
+            ignore_index=ignore_index,
+        )
+        struct_loss = ce_loss(
+            output.struct_logits / temperature,
+            struct_out,
+            ignore_idx=ignore_index,
+            reduction="none",
+        )
+        b = struct_out.shape[0]
+        struct_loss = rearrange(struct_loss, "(b l) -> b l", b=b)
+        valid = struct_out != ignore_index
+        denom = valid.sum(dim=1).clamp(min=1).to(struct_loss.dtype)
+        struct_score = -torch.sum(struct_loss.masked_fill(~valid, 0.0), dim=1) / (
+            denom ** alpha
+        )
+        struct_score = rearrange(struct_score, "(n b) -> n b", n=2).mean(dim=0)
+
+        weight = float(tree_rescore_cfg.get("weight", 1.0))
+        rescored = scores + weight * struct_score
+        illegal_score = _as_score_value(tree_rescore_cfg.get("illegal_score", "-inf"))
+        return rescored.masked_fill(illegal, illegal_score)
 
     def _beam_search(
         self,
