@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -53,6 +53,8 @@ class Decoder(DecodeModel):
         cross_coverage: bool,
         self_coverage: bool,
         vocab_info: VocabInfo,
+        sccm: Optional[Dict[str, Any]] = None,
+        fusion: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         self.vocab_info = vocab_info
@@ -76,7 +78,24 @@ class Decoder(DecodeModel):
             self_coverage=self_coverage,
         )
 
-        self.proj = nn.Linear(d_model, vocab_info.vocab_size)
+        sccm = sccm or {}
+        fusion = fusion or {}
+        if fusion.get("type", "gated") != "gated":
+            raise ValueError(f"Unsupported fusion type: {fusion.get('type')}")
+
+        self.SCCM = SCCM(
+            d_model=d_model,
+            nhead=sccm.get("nhead", 8),
+            dim_feedforward=sccm.get("dim_feedforward", 1024),
+            dropout=sccm.get("dropout", 0.3),
+            num_layers=sccm.get("num_layers", 1),
+        )
+        self.fusion = FusionModule(d_model)
+        self.exp_proj = nn.Linear(d_model, vocab_info.vocab_size)
+        self.imp_proj = nn.Sequential(nn.ReLU(), nn.Linear(d_model, vocab_info.vocab_size))
+        self.fusion_proj = nn.Sequential(
+            nn.ReLU(inplace=True), nn.Linear(d_model, vocab_info.vocab_size)
+        )
 
         self._causal_mask_cache = {}
 
@@ -98,7 +117,7 @@ class Decoder(DecodeModel):
 
     def forward(
         self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor
-    ) -> FloatTensor:
+    ) -> Tuple[FloatTensor, FloatTensor, FloatTensor]:
         """generate output for tgt
 
         Parameters
@@ -112,11 +131,11 @@ class Decoder(DecodeModel):
 
         Returns
         -------
-        FloatTensor
-            [b, l, vocab_size]
+        Tuple[FloatTensor, FloatTensor, FloatTensor]
+            explicit, implicit, and fusion logits, each [b, l, vocab_size]
         """
-        B_tgt, l = tgt.size()
-        tgt_mask = self._build_attention_mask(l)
+        _, l = tgt.size()
+        tgt_mask = self._build_attention_mask(l, device=tgt.device)
         tgt_pad_mask = tgt == self.vocab_info.pad_id
         
         tgt = self.word_embed(tgt)  # [b, l, d]
@@ -137,15 +156,66 @@ class Decoder(DecodeModel):
             memory_key_padding_mask=src_mask,
         )
 
-        out = rearrange(out, "l b d -> b l d")
-        out = self.proj(out)
+        exp_hidden = rearrange(out, "l b d -> b l d")
+        imp_hidden = self.SCCM(exp_hidden, tgt_mask, tgt_pad_mask)
+        fusion_hidden = self.fusion(exp_hidden, imp_hidden)
 
-        return out
+        exp_out = self.exp_proj(exp_hidden)
+        imp_out = self.imp_proj(imp_hidden)
+        fusion_out = self.fusion_proj(fusion_hidden)
+
+        return exp_out, imp_out, fusion_out
 
 
     def transform(
         self, src: List[FloatTensor], src_mask: List[LongTensor], input_ids: LongTensor
     ) -> FloatTensor:
         assert len(src) == 1 and len(src_mask) == 1
-        return self(src[0], src_mask[0], input_ids)
+        _, _, fusion_out = self(src[0], src_mask[0], input_ids)
+        return fusion_out
 
+
+class SCCM(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int = 8,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.3,
+        num_layers: int = 1,
+    ):
+        super().__init__()
+        self.te = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+            ),
+            num_layers=num_layers,
+        )
+
+    def forward(
+        self,
+        out: FloatTensor,
+        tgt_mask: LongTensor,
+        src_key_padding_mask: LongTensor,
+    ) -> FloatTensor:
+        out = rearrange(out, "b t d -> t b d")
+        out = self.te(
+            src=out,
+            mask=tgt_mask,
+            src_key_padding_mask=src_key_padding_mask,
+        )
+        return rearrange(out, "t b d -> b t d")
+
+
+class FusionModule(nn.Module):
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.w_att = nn.Linear(2 * d_model, d_model)
+
+    def forward(self, e_feature: FloatTensor, i_feature: FloatTensor) -> FloatTensor:
+        feature = torch.cat((e_feature, i_feature), dim=2)
+        gate = torch.sigmoid(self.w_att(feature))
+        return gate * i_feature + (1 - gate) * e_feature

@@ -6,7 +6,7 @@ from sconf import Config
 from tqdm import tqdm
 
 from datamodule import CROHMEDatamodule
-from lit_comer import LitCoMER
+from lit_ical import LitICAL
 
 
 def main(config_path: str, ckp_path: str, output_zip: str = "result.zip"):
@@ -20,7 +20,7 @@ def main(config_path: str, ckp_path: str, output_zip: str = "result.zip"):
     # vocab_info is retrieved explicitly — no shared_vocab import side-effects
     vocab_info = dm.vocab.get_info()
 
-    model = LitCoMER.load_from_checkpoint(ckp_path, config=config, vocab_info=vocab_info)
+    model = LitICAL.load_from_checkpoint(ckp_path, config=config, vocab_info=vocab_info)
     model.eval()
     model.cuda()
 

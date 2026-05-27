@@ -112,7 +112,7 @@ class ConditionalLastCheckpointCallback(Callback):
 
         try:
             if hasattr(value, "detach"):
-                return float(value.detach().cpu().item())
+                return float(value.detach().item())
             return float(value)
         except (TypeError, ValueError):
             return None
@@ -324,14 +324,14 @@ def train(config):
     data_module = CROHMEDatamodule(config=config)
 
     # Model
-    from lit_comer import LitCoMER
+    from lit_ical import LitICAL
     from utils.callbacks import (GradNormCallback)
     if config.trainer.resume_from_checkpoint is not None:
         print(f"Resuming full training state from: {config.trainer.resume_from_checkpoint}")
     else:
         print("Training from new weights")
 
-    model_module = LitCoMER(
+    model_module = LitICAL(
         config=config,
         beam_size=config.model.beam_size,
         max_len=config.model.max_len,
@@ -344,7 +344,7 @@ def train(config):
    # Logger
     logger = Logger(config.wandb.name, project=config.wandb.project, config=dict(config), log_model=False)
     if config.wandb.get("wandb_watch", False):
-        logger.watch(model_module.comer_model, log=config.wandb.get("wandb_watch_log", "gradients"), log_freq=config.wandb.get("wandb_watch_log_freq", 1000))
+        logger.watch(model_module.ical_model, log=config.wandb.get("wandb_watch_log", "gradients"), log_freq=config.wandb.get("wandb_watch_log_freq", 1000))
 
    # Callback
     lr_callback = LearningRateMonitor(logging_interval=config.trainer.callbacks[0].init_args.logging_interval)

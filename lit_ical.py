@@ -1,20 +1,18 @@
 import zipfile
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List
 
 import pytorch_lightning as pl
+import torch
 import torch.optim as optim
 from torch import FloatTensor, LongTensor
-import torch
 
-from datamodule.datamodule import CROHMEDatamodule
 from datamodule.utils import Batch
-from datamodule.vocab import VocabInfo
+from models.ical import ICAL
+from utils.utils import ExpRateRecorder, Hypothesis, ce_loss
+from utils.vocab_info import VocabInfo
 
-from models.comer import CoMER
-from utils.utils import (ExpRateRecorder, Hypothesis, ce_loss, to_tgt_output)
 
-
-class LitCoMER(pl.LightningModule):
+class LitICAL(pl.LightningModule):
     def __init__(
         self,
         config: Dict[str, Any],
@@ -28,18 +26,21 @@ class LitCoMER(pl.LightningModule):
         super().__init__()
         mcfg = config["model"]
         self.vocab_info = vocab_info
-        # Ignore vocab_info in save_hyperparameters to avoid deep serialization issues
         self.save_hyperparameters(ignore=["vocab_info"])
-        
 
-        # model
-        self.comer_model = CoMER(config, vocab_info=vocab_info)
-        #- -------------------------Optimizer config---------------------------------
+        self.ical_model = ICAL(config, vocab_info=vocab_info)
         self.optimizer_cfg = mcfg.get("optimizer", {})
         self.optimizer_use = self.optimizer_cfg.get("use", "SGD")
         self.exprate_recorder = ExpRateRecorder(vocab_info)
 
-        # -------------------------Scheduler config---------------------------------
+        loss_cfg = mcfg.get("loss", {})
+        self.explicit_loss_weight = float(loss_cfg.get("explicit_weight", 1.0))
+        self.implicit_loss_weight = float(loss_cfg.get("implicit_weight", 1.0))
+        self.fusion_loss_weight = float(loss_cfg.get("fusion_weight", 1.0))
+        self.dynamic_implicit_weight = bool(
+            loss_cfg.get("dynamic_implicit_weight", True)
+        )
+
         self.scheduler_cfg = mcfg.get("scheduler", {})
         self.scheduler_use = self.scheduler_cfg.get("use", "ReduceLROnPlateau")
         self.scheduler_interval = self.scheduler_cfg.get("interval", "epoch")
@@ -61,48 +62,54 @@ class LitCoMER(pl.LightningModule):
         img: FloatTensor,
         img_mask: LongTensor,
         tgt: LongTensor,
-    ) -> FloatTensor:
-        """run img and bi-tgt
+    ):
+        return self.ical_model(img, img_mask, tgt)
 
-        Parameters
-        ----------
-        img : FloatTensor
-            [b, 1, h, w]
-        img_mask: LongTensor
-            [b, h, w]
-        tgt : LongTensor
-            [2b, l]
+    def transfer_batch_to_device(self, batch, device, dataloader_idx: int = 0):
+        if isinstance(batch, Batch):
+            return batch.to(device, non_blocking=True)
+        return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
-        Returns
-        -------
-        FloatTensor
-            [2b, l, vocab_size]
-        """
-        return self.comer_model(img, img_mask, tgt)
+    def _compute_losses(self, batch: Batch):
+        exp_logits, imp_logits, fusion_logits = self(
+            batch.imgs, batch.mask, batch.exp_tgt
+        )
+        exp_loss = ce_loss(
+            exp_logits, batch.exp_out, ignore_idx=self.vocab_info.pad_id
+        )
+        imp_loss = ce_loss(
+            imp_logits,
+            batch.imp_out,
+            ignore_idx=self.vocab_info.pad_id,
+            need_weight=self.dynamic_implicit_weight,
+            class_of_interest=self.vocab_info.space_id,
+        )
+        fusion_loss = ce_loss(
+            fusion_logits, batch.fusion_out, ignore_idx=self.vocab_info.pad_id
+        )
+        loss = (
+            self.explicit_loss_weight * exp_loss
+            + self.implicit_loss_weight * imp_loss
+            + self.fusion_loss_weight * fusion_loss
+        )
+        return loss, exp_loss, imp_loss, fusion_loss
 
     def training_step(self, batch: Batch, _):
-        out_hat = self(batch.imgs, batch.mask, batch.tgt)
-
-        loss = ce_loss(out_hat, batch.out, ignore_idx=self.vocab_info.pad_id)
+        loss, exp_loss, imp_loss, fusion_loss = self._compute_losses(batch)
+        self.log("train_explicit_loss", exp_loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train_implicit_loss", imp_loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train_fusion_loss", fusion_loss, on_step=False, on_epoch=True, sync_dist=True)
         self.log("train_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
-
         return loss
 
     def validation_step(self, batch: Batch, _):
-        out_hat = self(batch.imgs, batch.mask, batch.tgt)
-
-        loss = ce_loss(out_hat, batch.out, ignore_idx=self.vocab_info.pad_id)
-        self.log(
-            "val_loss",
-            loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
+        loss, exp_loss, imp_loss, fusion_loss = self._compute_losses(batch)
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("val_exp_loss", exp_loss, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("val_imp_loss", imp_loss, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("val_fusion_loss", fusion_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
         hyps = self.approximate_joint_search(batch.imgs, batch.mask)
-
         self.exprate_recorder([h.seq for h in hyps], batch.indices)
         self.log(
             "val_ExpRate",
@@ -112,7 +119,7 @@ class LitCoMER(pl.LightningModule):
             on_epoch=True,
             sync_dist=True,
         )
-    
+
     def on_fit_start(self):
         self._init_warmup_if_needed()
 
@@ -121,7 +128,7 @@ class LitCoMER(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         self._step_plateau_after_warmup()
-    
+
     def on_train_epoch_start(self):
         sampler = None
         datamodule = getattr(self.trainer, "datamodule", None)
@@ -148,10 +155,13 @@ class LitCoMER(pl.LightningModule):
             )
 
         sampler.set_epoch(int(self.current_epoch))
+
     def validation_epoch_end(self, *args, **kwargs):
         pass
+
     def training_step_end(self, *args, **kwargs):
         pass
+
     def validation_step_end(self, *args, **kwargs):
         pass
 
@@ -201,6 +211,7 @@ class LitCoMER(pl.LightningModule):
             "If you use IterableDataset or dynamic dataloader length, set warmup.interval='step' "
             "and provide warmup.steps explicitly."
         )
+
     def _resolve_warmup_total_steps(self) -> int:
         if not self.warmup_enabled:
             return 0
@@ -211,11 +222,11 @@ class LitCoMER(pl.LightningModule):
             train_batches_per_epoch = self._get_train_batches_per_epoch()
             return max(int(self.warmup_epochs) * int(train_batches_per_epoch), 0)
         raise ValueError(f"Unknown warmup interval: {self.warmup_interval}. Use 'step' or 'epoch'.")
-        
+
     def _set_optimizer_lrs(self, optimizer, lrs: List[float]) -> None:
         for param_group, lr in zip(optimizer.param_groups, lrs):
             param_group["lr"] = float(lr)
-            
+
     def _get_optimizer(self):
         if self.trainer is None or len(self.trainer.optimizers) == 0:
             return None
@@ -235,7 +246,7 @@ class LitCoMER(pl.LightningModule):
             self._set_optimizer_lrs(optimizer, self._target_lrs)
         else:
             self._set_optimizer_lrs(optimizer, [0.0 for _ in self._target_lrs])
-            
+
     def _apply_linear_warmup_if_needed(self) -> None:
         if not self.warmup_enabled:
             return
@@ -266,6 +277,7 @@ class LitCoMER(pl.LightningModule):
             except Exception:
                 monitor_value = None
         return monitor_value
+
     def _step_plateau_after_warmup(self) -> None:
         if self._plateau_scheduler is None:
             return
@@ -283,14 +295,13 @@ class LitCoMER(pl.LightningModule):
             monitor_value = monitor_value.detach()
             if monitor_value.numel() == 1:
                 monitor_value = monitor_value.item()
-        old_lr = self.trainer.optimizers[0].param_groups[0]["lr"]
         self._plateau_scheduler.step(monitor_value)
         new_lr = self.trainer.optimizers[0].param_groups[0]["lr"]
         self.log("plateau_monitor", float(monitor_value), on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
         self.log("lr_after_plateau", float(new_lr), on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
-    
+
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        checkpoint["lit_comer_warmup_state"] = {
+        checkpoint["lit_ical_warmup_state"] = {
             "target_lrs": self._target_lrs,
             "warmup_total_steps": self._warmup_total_steps,
             "warmup_finished": self._warmup_finished,
@@ -302,18 +313,18 @@ class LitCoMER(pl.LightningModule):
         }
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        state = checkpoint.get("lit_comer_warmup_state", {})
+        state = checkpoint.get("lit_ical_warmup_state", {})
         self._target_lrs = state.get("target_lrs", self._target_lrs)
         self._warmup_total_steps = state.get("warmup_total_steps", self._warmup_total_steps)
         self._warmup_finished = state.get("warmup_finished", self._warmup_finished)
         self._loaded_plateau_scheduler_state = state.get("plateau_scheduler", None)
 
     def approximate_joint_search(
-        self, 
-        img: FloatTensor, 
+        self,
+        img: FloatTensor,
         mask: LongTensor,
     ) -> List[Hypothesis]:
-        return self.comer_model.beam_search(img, mask, **self.hparams)
+        return self.ical_model.beam_search(img, mask, **self.hparams)
 
     def configure_optimizers(self):
         name = self.optimizer_use
@@ -360,7 +371,6 @@ class LitCoMER(pl.LightningModule):
             loaded_state = getattr(self, "_loaded_plateau_scheduler_state", None)
             if loaded_state is not None:
                 self._plateau_scheduler.load_state_dict(loaded_state)
-
         else:
             raise ValueError(f"Unknown scheduler: {sched_name}")
 

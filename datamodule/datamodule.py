@@ -41,8 +41,16 @@ class CROHMEDatamodule(pl.LightningDataModule):
         self.pin_memory                 = data_config.pin_memory
         self.persistent_workers         = data_config.persistent_workers
         if CROHMEDatamodule.shared_vocab is None:
-            CROHMEDatamodule.shared_vocab = Vocab(dict_path=data_config.dictionary_txt)
+            CROHMEDatamodule.shared_vocab = Vocab(
+                dict_path=data_config.dictionary_txt,
+                force_ical_special_token_order=data_config.get("force_ical_special_token_order", True),
+                special_tokens=data_config.get("special_tokens", None),
+                implicit_structural_tokens=data_config.get(
+                    "implicit_structural_tokens", ["{", "}", "^", "_"]
+                ),
+            )
         self.vocab = CROHMEDatamodule.shared_vocab        
+        self.vocab_info = self.vocab.get_info()
         self.train_batch_sampler = None
         self.val_batch_sampler = None
         self.test_batch_sampler = None
@@ -67,7 +75,7 @@ class CROHMEDatamodule(pl.LightningDataModule):
             x[idx, :, : heights_x[idx], : widths_x[idx]] = s_x
             x_mask[idx, : heights_x[idx], : widths_x[idx]] = 0
 
-        from utils.utils import to_bi_tgt_out_from_padded
+        from utils.utils import make_ical_targets_from_padded
         
         lengths_x = [len(s) for s in seqs_y]
         max_len = max(lengths_x) if len(lengths_x) > 0 else 0
@@ -76,12 +84,17 @@ class CROHMEDatamodule(pl.LightningDataModule):
             labels[i, :lengths_x[i]] = torch.tensor(s, dtype=torch.long)
         lengths = torch.tensor(lengths_x, dtype=torch.long)
         
-        # Vectorized bidirectional tgt/out from padded labels (D1)
-        tgt, out = to_bi_tgt_out_from_padded(
-            labels, lengths,
-            sos_id=self.vocab.SOS_IDX,
-            eos_id=self.vocab.EOS_IDX,
-            pad_id=self.vocab.PAD_IDX,
+        (
+            exp_tgt,
+            exp_out,
+            imp_tgt,
+            imp_out,
+            fusion_tgt,
+            fusion_out,
+        ) = make_ical_targets_from_padded(
+            labels=labels,
+            lengths=lengths,
+            vocab_info=self.vocab_info,
         )
 
         return Batch(
@@ -89,10 +102,16 @@ class CROHMEDatamodule(pl.LightningDataModule):
             imgs=x,
             mask=x_mask,
             indices=seqs_y,
-            tgt=tgt,
-            out=out,
+            tgt=exp_tgt,
+            out=exp_out,
             labels=labels,
             lengths=lengths,
+            exp_tgt=exp_tgt,
+            exp_out=exp_out,
+            imp_tgt=imp_tgt,
+            imp_out=imp_out,
+            fusion_tgt=fusion_tgt,
+            fusion_out=fusion_out,
         )
 
         

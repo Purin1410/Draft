@@ -24,6 +24,7 @@ trainer:
   log_grad_norm: false
 
 model:
+  name: "ICAL"
   d_model: 256
   # -------- encoder --------
   growth_rate: 24
@@ -40,6 +41,13 @@ model:
   dc: 32
   cross_coverage: true
   self_coverage: true
+  sccm:
+    nhead: 8
+    dim_feedforward: 1024
+    dropout: 0.3
+    num_layers: 1
+  fusion:
+    type: "gated"
   # -------- beam search --------
   beam_size: 10
   max_len: 200
@@ -47,6 +55,11 @@ model:
   early_stopping: false
   temperature: 1.0
   # -------- training --------
+  loss:
+    explicit_weight: 1.0
+    implicit_weight: 1.0
+    fusion_weight: 1.0
+    dynamic_implicit_weight: true
   optimizer:
     use: SGD # SGD, Adam, AdamW, Adadelta
     # init for SGD
@@ -88,6 +101,13 @@ data:
   zipfile_path: crohme_data/data
   test_year: '2014'
   dictionary_txt: crohme_data/data/dictionary.txt
+  force_ical_special_token_order: true
+  special_tokens:
+    pad: "<pad>"
+    sos: "<sos>"
+    eos: "<eos>"
+    space: "<space>"
+  implicit_structural_tokens: ["{", "}", "^", "_"]
   train_batch_size: 8
   eval_batch_size: 4
   num_workers: 4
@@ -109,7 +129,7 @@ data:
   lazy_load: false
 
 wandb:
-  name: "CoMER"
+  name: "ICAL"
   project: "DSP391m_Group1_FALL25"
   wandb_watch: false
   wandb_watch_log: "gradients"

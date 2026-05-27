@@ -1,5 +1,5 @@
 """
-test_beam.py — Restored smoke tests for CoMER pipeline.
+test_beam.py - Restored smoke tests for ICAL pipeline.
 
 Tests call restored full-prefix beam search behavior.
 No dataset, checkpoint, or GPU required.
@@ -8,7 +8,9 @@ No dataset, checkpoint, or GPU required.
 import sys
 import torch
 import torch.nn as nn
+import tempfile
 from typing import List, Tuple
+from pathlib import Path
 from torch import FloatTensor, LongTensor
 
 from utils.vocab_info import VocabInfo
@@ -19,6 +21,7 @@ from utils.beam_search import BeamSearchScorer
 PAD = 0
 SOS = 1
 EOS = 2
+SPACE = 3
 VOCAB_SIZE = 20
 
 def _make_vocab_info() -> VocabInfo:
@@ -26,6 +29,8 @@ def _make_vocab_info() -> VocabInfo:
         pad_id=PAD,
         sos_id=SOS,
         eos_id=EOS,
+        space_id=SPACE,
+        structural_token_ids=(4, 5, 6, 7),
         vocab_size=VOCAB_SIZE,
         words=None,
     )
@@ -82,15 +87,50 @@ def test_padding_logic():
     from datamodule.datamodule import CROHMEDatamodule
     from sconf import Config
     
-    # Mock config
-    config = Config({"data": {"dictionary_txt": "crohme_data/data/dictionary.txt", "pad_strategy": "batch_max"}})
-    # We need a real dictionary or mock Vocab
+    tmp_dir = tempfile.TemporaryDirectory()
+    dict_path = Path(tmp_dir.name) / "dictionary.txt"
+    dict_path.write_text("a\nb\nc\nd\n{\n}\n^\n_\n", encoding="utf-8")
+    config = Config(
+        {
+            "seed_everything": 7,
+            "model": {"max_len": 200},
+            "data": {
+                "zipfile_path": "unused",
+                "test_year": "2014",
+                "dictionary_txt": str(dict_path),
+                "train_batch_size": 2,
+                "eval_batch_size": 2,
+                "num_workers": 0,
+                "scale_aug": False,
+                "max_pixels_per_batch": 1280000,
+                "lazy_load": False,
+                "k_min": 0.7,
+                "k_max": 1.4,
+                "w_lo": 16,
+                "w_hi": 1024,
+                "h_lo": 16,
+                "h_hi": 256,
+                "pin_memory": False,
+                "persistent_workers": False,
+                "force_ical_special_token_order": True,
+                "special_tokens": {
+                    "pad": "<pad>",
+                    "sos": "<sos>",
+                    "eos": "<eos>",
+                    "space": "<space>",
+                },
+                "implicit_structural_tokens": ["{", "}", "^", "_"],
+            },
+        }
+    )
     from unittest.mock import MagicMock
+    CROHMEDatamodule.shared_vocab = None
     dm = CROHMEDatamodule(config)
     dm.vocab = MagicMock()
     dm.vocab.PAD_IDX = 0
     dm.vocab.SOS_IDX = 1
     dm.vocab.EOS_IDX = 2
+    dm.vocab_info = _make_vocab_info()
     dm.vocab.words2indices = lambda x: [10, 11]
 
     # Mock batch
@@ -107,6 +147,7 @@ def test_padding_logic():
     # Check not rounded to 32
     assert batch.imgs.shape[2] != 32
     assert batch.imgs.shape[3] != 32
+    tmp_dir.cleanup()
     print("[PASS] Padding follows batch_max (15, 20)")
 
 if __name__ == "__main__":

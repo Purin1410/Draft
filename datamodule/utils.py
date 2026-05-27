@@ -251,6 +251,12 @@ class Batch:
     out: Optional[LongTensor] = None
     labels: Optional[LongTensor] = None
     lengths: Optional[LongTensor] = None
+    exp_tgt: Optional[LongTensor] = None
+    exp_out: Optional[LongTensor] = None
+    imp_tgt: Optional[LongTensor] = None
+    imp_out: Optional[LongTensor] = None
+    fusion_tgt: Optional[LongTensor] = None
+    fusion_out: Optional[LongTensor] = None
 
     def __len__(self) -> int:
         return len(self.img_bases)
@@ -265,6 +271,12 @@ class Batch:
             out=None if self.out is None else self.out.pin_memory(),
             labels=None if self.labels is None else self.labels.pin_memory(),
             lengths=None if self.lengths is None else self.lengths.pin_memory(),
+            exp_tgt=None if self.exp_tgt is None else self.exp_tgt.pin_memory(),
+            exp_out=None if self.exp_out is None else self.exp_out.pin_memory(),
+            imp_tgt=None if self.imp_tgt is None else self.imp_tgt.pin_memory(),
+            imp_out=None if self.imp_out is None else self.imp_out.pin_memory(),
+            fusion_tgt=None if self.fusion_tgt is None else self.fusion_tgt.pin_memory(),
+            fusion_out=None if self.fusion_out is None else self.fusion_out.pin_memory(),
         )
 
     def to(self, device, non_blocking=True) -> "Batch":
@@ -277,4 +289,10 @@ class Batch:
             out=None if self.out is None else self.out.to(device, non_blocking=non_blocking),
             labels=None if self.labels is None else self.labels.to(device, non_blocking=non_blocking),
             lengths=None if self.lengths is None else self.lengths.to(device, non_blocking=non_blocking),
+            exp_tgt=None if self.exp_tgt is None else self.exp_tgt.to(device, non_blocking=non_blocking),
+            exp_out=None if self.exp_out is None else self.exp_out.to(device, non_blocking=non_blocking),
+            imp_tgt=None if self.imp_tgt is None else self.imp_tgt.to(device, non_blocking=non_blocking),
+            imp_out=None if self.imp_out is None else self.imp_out.to(device, non_blocking=non_blocking),
+            fusion_tgt=None if self.fusion_tgt is None else self.fusion_tgt.to(device, non_blocking=non_blocking),
+            fusion_out=None if self.fusion_out is None else self.fusion_out.to(device, non_blocking=non_blocking),
         )

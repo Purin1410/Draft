@@ -65,6 +65,8 @@ def ce_loss(
     output: torch.Tensor,
     ignore_idx: int,
     reduction: str = "mean",
+    need_weight: bool = False,
+    class_of_interest: Optional[int] = None,
 ) -> torch.Tensor:
     """comput cross-entropy loss
 
@@ -76,9 +78,28 @@ def ce_loss(
     Returns:
         torch.Tensor: loss value
     """
-    flat_hat = rearrange(output_hat, "b l e -> (b l) e")
-    flat = rearrange(output, "b l -> (b l)")
-    loss = F.cross_entropy(flat_hat, flat, ignore_index=ignore_idx, reduction=reduction)
+    vocab_size = output_hat.shape[-1]
+    flat_hat = output_hat.reshape(-1, vocab_size)
+    flat = output.reshape(-1)
+    weight = None
+    if need_weight:
+        weight = torch.ones(vocab_size, device=output_hat.device, dtype=output_hat.dtype)
+        if class_of_interest is not None:
+            valid = flat.ne(ignore_idx)
+            total = valid.sum().clamp_min(1).to(dtype=output_hat.dtype)
+            class_count = flat[valid].eq(class_of_interest).sum().clamp_min(1)
+            frequency = class_count.to(dtype=output_hat.dtype) / total
+            smooth_weight = 1.0 + torch.log1p(1.0 / ((1.0 - frequency) + 1e-6))
+            smooth_weight = torch.clamp(smooth_weight, max=10.0)
+            weight[:] = smooth_weight
+            weight[class_of_interest] = 1.0
+    loss = F.cross_entropy(
+        flat_hat,
+        flat,
+        weight=weight,
+        ignore_index=ignore_idx,
+        reduction=reduction,
+    )
     return loss
 
 
@@ -242,3 +263,52 @@ def to_bi_tgt_out_from_padded(
     tgt = torch.cat((l2r_tgt, r2l_tgt), dim=0)
     out = torch.cat((l2r_out, r2l_out), dim=0)
     return tgt, out
+
+
+def make_implicit_labels_from_padded(
+    labels: LongTensor,
+    lengths: LongTensor,
+    vocab_info,
+) -> LongTensor:
+    """Replace non-structural valid label tokens with the configured space id."""
+    implicit = labels.clone()
+    if labels.numel() == 0:
+        return implicit
+
+    _, max_len = labels.shape
+    positions = torch.arange(max_len, device=labels.device).unsqueeze(0)
+    valid = positions < lengths.unsqueeze(1)
+
+    structural = torch.zeros_like(labels, dtype=torch.bool)
+    for token_id in vocab_info.structural_token_ids:
+        structural |= labels.eq(int(token_id))
+
+    implicit[valid & ~structural] = int(vocab_info.space_id)
+    implicit[~valid] = int(vocab_info.pad_id)
+    return implicit
+
+
+def make_ical_targets_from_padded(
+    labels: LongTensor,
+    lengths: LongTensor,
+    vocab_info,
+) -> Tuple[LongTensor, LongTensor, LongTensor, LongTensor, LongTensor, LongTensor]:
+    """Build explicit, implicit, and fusion bidirectional targets once per batch."""
+    exp_tgt, exp_out = to_bi_tgt_out_from_padded(
+        labels=labels,
+        lengths=lengths,
+        sos_id=vocab_info.sos_id,
+        eos_id=vocab_info.eos_id,
+        pad_id=vocab_info.pad_id,
+    )
+    implicit_labels = make_implicit_labels_from_padded(labels, lengths, vocab_info)
+    imp_tgt, imp_out = to_bi_tgt_out_from_padded(
+        labels=implicit_labels,
+        lengths=lengths,
+        sos_id=vocab_info.sos_id,
+        eos_id=vocab_info.eos_id,
+        pad_id=vocab_info.pad_id,
+    )
+    fusion_tgt = exp_tgt.clone()
+    fusion_out = exp_out.clone()
+    return exp_tgt, exp_out, imp_tgt, imp_out, fusion_tgt, fusion_out
