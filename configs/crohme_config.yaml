@@ -107,7 +107,6 @@ data:
   pin_memory: true
   persistent_workers: true
   lazy_load: false
-  pad_strategy: "batch_max"
 
 wandb:
   name: "CoMER"
