@@ -412,3 +412,54 @@ class LitTAMER(pl.LightningModule):
             prog_bar=False,
             sync_dist=True,
         )
+    
+    def configure_optimizers(self):
+        name = self.optimizer_use
+        if name == "SGD":
+            optimizer = optim.SGD(
+                self.parameters(),
+                lr=self.optimizer_cfg.get("SGD", {}).get("lr", 0.08),
+                momentum=self.optimizer_cfg.get("SGD", {}).get("momentum", 0.9),
+                weight_decay=self.optimizer_cfg.get("SGD", {}).get("weight_decay", 1e-4),
+            )
+        elif name == "Adam":
+            optimizer = optim.Adam(
+                self.parameters(),
+                lr=self.optimizer_cfg.get("Adam", {}).get("lr", 0.08),
+                betas=self.optimizer_cfg.get("Adam", {}).get("betas", (0.9, 0.999)),
+            )
+        elif name == "AdamW":
+            optimizer = optim.AdamW(
+                self.parameters(),
+                lr=self.optimizer_cfg.get("AdamW", {}).get("lr", 0.08),
+                betas=self.optimizer_cfg.get("AdamW", {}).get("betas", (0.9, 0.999)),
+                weight_decay=self.optimizer_cfg.get("AdamW", {}).get("weight_decay", 1e-4),
+            )
+        elif name == "Adadelta":
+            optimizer = optim.Adadelta(
+                self.parameters(),
+                lr=self.optimizer_cfg.get("Adadelta", {}).get("lr", 1),
+                weight_decay=self.optimizer_cfg.get("Adadelta", {}).get("weight_decay", 1e-4),
+                eps=self.optimizer_cfg.get("Adadelta", {}).get("eps", 1e-6),
+            )
+        else:
+            raise ValueError(f"Unknown optimizer: {name}")
+
+        self._target_lrs = [float(pg["lr"]) for pg in optimizer.param_groups]
+
+        sched_name = self.scheduler_use
+        if sched_name == "ReduceLROnPlateau":
+            self._plateau_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer=optimizer,
+                mode=self.scheduler_cfg.get("ReduceLROnPlateau", {}).get("mode", "max"),
+                factor=self.scheduler_cfg.get("ReduceLROnPlateau", {}).get("factor", 0.25),
+                patience=self.scheduler_cfg.get("ReduceLROnPlateau", {}).get("patience", 6),
+            )
+            loaded_state = getattr(self, "_loaded_plateau_scheduler_state", None)
+            if loaded_state is not None:
+                self._plateau_scheduler.load_state_dict(loaded_state)
+
+        else:
+            raise ValueError(f"Unknown scheduler: {sched_name}")
+
+        return optimizer
