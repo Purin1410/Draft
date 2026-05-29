@@ -37,12 +37,16 @@ class TransformerDecoder(nn.Module):
         memory_mask: Optional[Tensor] = None,
         tgt_key_padding_mask: Optional[Tensor] = None,
         memory_key_padding_mask: Optional[Tensor] = None,
-    ) -> Tensor:
+        return_attn_maps: bool = False,
+        return_self_attn_maps: bool = False,
+    ):
         output = tgt
+        attn_maps = [] if return_attn_maps else None
+        self_attn_maps = [] if return_self_attn_maps else None
 
         arm = None
         for i, mod in enumerate(self.layers):
-            output, attn = mod(
+            output, attn, self_attn = mod(
                 output,
                 memory,
                 arm,
@@ -50,13 +54,24 @@ class TransformerDecoder(nn.Module):
                 memory_mask=memory_mask,
                 tgt_key_padding_mask=tgt_key_padding_mask,
                 memory_key_padding_mask=memory_key_padding_mask,
+                return_self_attn=return_self_attn_maps,
             )
+            if return_attn_maps:
+                attn_maps.append(attn.detach())
+            if return_self_attn_maps:
+                self_attn_maps.append(self_attn.detach())
             if i != len(self.layers) - 1 and self.arm is not None:
                 arm = partial(self.arm, attn, memory_key_padding_mask, height)
 
         if self.norm is not None:
             output = self.norm(output)
 
+        if return_attn_maps and return_self_attn_maps:
+            return output, {"cross_attn": attn_maps, "self_attn": self_attn_maps}
+        if return_attn_maps:
+            return output, attn_maps
+        if return_self_attn_maps:
+            return output, {"self_attn": self_attn_maps}
         return output
 
 
@@ -96,6 +111,7 @@ class TransformerDecoderLayer(nn.Module):
         memory_mask: Optional[Tensor] = None,
         tgt_key_padding_mask: Optional[Tensor] = None,
         memory_key_padding_mask: Optional[Tensor] = None,
+        return_self_attn: bool = False,
     ) -> Tensor:
         r"""Pass the inputs (and mask) through the decoder layer.
 
@@ -110,11 +126,12 @@ class TransformerDecoderLayer(nn.Module):
         Shape:
             see the docs in Transformer class.
         """
-        tgt2 = self.self_attn(
+        tgt2, self_attn = self.self_attn(
             tgt, tgt, tgt,
             attn_mask=tgt_mask,
             key_padding_mask=tgt_key_padding_mask,
-        )[0]
+            need_weights=return_self_attn,
+        )
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
         tgt2, attn = self.multihead_attn(
@@ -130,5 +147,5 @@ class TransformerDecoderLayer(nn.Module):
         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
         tgt = tgt + self.dropout3(tgt2)
         tgt = self.norm3(tgt)
-        return tgt, attn
+        return tgt, attn, self_attn
 

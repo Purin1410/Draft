@@ -59,8 +59,10 @@ class CoMER(pl.LightningModule):
         )
 
     def forward(
-        self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor
-    ) -> FloatTensor:
+        self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor,
+        return_aux: bool = False, capture_embed: bool = False,
+        capture_cross_attn: bool = False, capture_self_attn: bool = False
+    ):
         """run img and bi-tgt
 
         Parameters
@@ -81,7 +83,13 @@ class CoMER(pl.LightningModule):
         feature = torch.cat((feature, feature), dim=0)  # [2b, t, d]
         mask = torch.cat((mask, mask), dim=0)
 
-        out = self.decoder(feature, mask, tgt)
+        out = self.decoder(
+            feature, mask, tgt,
+            return_aux=return_aux,
+            capture_embed=capture_embed,
+            capture_cross_attn=capture_cross_attn,
+            capture_self_attn=capture_self_attn,
+        )
 
         return out
 
@@ -113,5 +121,5 @@ class CoMER(pl.LightningModule):
         """
         feature, mask = self.encoder(img, img_mask)  # [b, t, d]
         return self.decoder.beam_search(
-            [feature], [mask], beam_size, max_len, alpha, early_stopping, temperature
+            [feature], [mask], beam_size, max_len, alpha, early_stopping, temperature, return_nbest=kwargs.get("return_nbest", False)
         )

@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,7 @@ from einops.einops import repeat
 from torch import FloatTensor, LongTensor
 from utils.vocab_info import VocabInfo
 from .beam_search import BeamSearchScorer
+from .analysis_logging import BeamCandidate, BeamSearchOutput
 
 
 # modified from
@@ -100,7 +101,8 @@ class DecodeModel(nn.Module):
         alpha: float,
         early_stopping: bool,
         temperature: float,
-    ) -> List[Hypothesis]:
+        return_nbest: bool = False,
+    ) -> Union[List[Hypothesis], List[BeamSearchOutput]]:
         """run beam search to decode
 
         Parameters
@@ -113,14 +115,19 @@ class DecodeModel(nn.Module):
         max_len : int
         alpha : float
         early_stopping : bool
+        temperature : float
+        return_nbest : bool
+            If True, return List[BeamSearchOutput] with all candidates per sample.
+            If False (default), return List[Hypothesis] (backward compatible).
 
         Returns
         -------
-        List[Hypothesis]: [batch_size,]
+        Union[List[Hypothesis], List[BeamSearchOutput]]
         """
         batch_size = src[0].shape[0] * 2  # mul 2 for bi-direction
         batch_beam_size = batch_size * beam_size
         half_bb_size = batch_beam_size // 2
+        real_batch = batch_size // 2  # original samples
 
         for i in range(len(src)):
             # Bidirectional beam search: duplicate encoder features for l2r + r2l directions.
@@ -181,30 +188,57 @@ class DecodeModel(nn.Module):
         scores = scores + rev_scores
 
         # [2 * b, beam_size]
-        scores = rearrange(scores, "(b m) -> b m", b=batch_size)
-        l2r_scores, r2l_scores = torch.chunk(scores, 2, dim=0)
+        scores_2d = rearrange(scores, "(b m) -> b m", b=batch_size)
+        l2r_scores, r2l_scores = torch.chunk(scores_2d, 2, dim=0)
         # [b, 2 * beam_size]
-        scores = torch.cat((l2r_scores, r2l_scores), dim=1)
+        combined_scores = torch.cat((l2r_scores, r2l_scores), dim=1)
         # [batch_size, ]
-        best_scores, best_indices = torch.max(scores, dim=1)
+        best_scores, best_indices = torch.max(combined_scores, dim=1)
         best_split = best_indices // beam_size
-        best_indices = best_indices % beam_size
+        best_indices_in_beam = best_indices % beam_size
         batch_indices = torch.arange(
-            0, batch_size // 2, dtype=torch.long, device=self.device
+            0, real_batch, dtype=torch.long, device=self.device
         )
-        best_indices = (
-            best_split * half_bb_size + batch_indices * beam_size + best_indices
+        best_flat_indices = (
+            best_split * half_bb_size + batch_indices * beam_size + best_indices_in_beam
         )
 
         # Post-decode CPU conversion — .cpu().tolist() is allowed here (outside hot loop)
-        best_indices_cpu = best_indices.cpu().tolist()
+        best_flat_cpu = best_flat_indices.cpu().tolist()
         best_scores_cpu = best_scores.cpu().tolist()
 
         ret: List[Hypothesis] = []
-        for idx, score in zip(best_indices_cpu, best_scores_cpu):
+        for idx, score in zip(best_flat_cpu, best_scores_cpu):
             hpy = Hypothesis(hyps[idx].cpu(), score, "l2r")
             ret.append(hpy)
-        return ret
+
+        if not return_nbest:
+            return ret
+
+        # Build n-best output per sample
+        nbest_results: List[BeamSearchOutput] = []
+        scores_cpu = scores.cpu()
+        for b in range(real_batch):
+            sample_candidates = []
+            # l2r candidates: indices [b*beam_size .. (b+1)*beam_size) in first half
+            for k in range(beam_size):
+                l2r_idx = b * beam_size + k
+                l2r_score = scores_cpu[l2r_idx].item()
+                sample_candidates.append(
+                    BeamCandidate(seq=hyps[l2r_idx].cpu(), score=l2r_score, direction="l2r")
+                )
+            # r2l candidates: indices [half_bb_size + b*beam_size .. half_bb_size + (b+1)*beam_size)
+            for k in range(beam_size):
+                r2l_idx = half_bb_size + b * beam_size + k
+                r2l_score = scores_cpu[r2l_idx].item()
+                sample_candidates.append(
+                    BeamCandidate(seq=hyps[r2l_idx].cpu(), score=r2l_score, direction="r2l")
+                )
+            # Sort descending by score
+            sample_candidates.sort(key=lambda c: c.score, reverse=True)
+            nbest_results.append(BeamSearchOutput(best=ret[b], candidates=sample_candidates))
+
+        return nbest_results
 
     def _beam_search(
         self,

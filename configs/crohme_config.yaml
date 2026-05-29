@@ -114,3 +114,64 @@ wandb:
   wandb_watch: false
   wandb_watch_log: "gradients"
   wandb_watch_log_freq: 1000
+
+analysis_logging:
+  enabled: false
+  log_dir: analysis_logs
+  run_id: null
+  phases: [val]
+  csv_core: true
+  jsonl_detail: true
+  skip_sanity_check: true
+
+  token_detail: true
+  token_topk: 5
+  teacher_forced_top1: true
+  topk_preds: true
+  nbest_k: 10
+
+  train:
+    enabled: false
+    log_every_n_steps: 500
+    max_batches_per_epoch: 1
+    max_samples_per_epoch: 128
+    decode_autoregressive: false
+    log_csv_without_decode: false
+    jsonl_detail: true
+    topk_preds: false
+
+  val:
+    enabled: true
+    max_samples_per_epoch: null
+
+  test:
+    enabled: true
+    max_samples_per_epoch: null
+
+  capture_embed: false
+  capture_cross_attn: false
+  capture_self_attn: false
+  # Stores only the last decoder layer cross-attention map when true.
+  # The serialized map is capped by cross_attn.max_tokens and cross_attn.max_heads.
+  # Leave false for normal training; summary mode writes cross_attn_summary instead.
+  full_cross_attn_map: false
+  full_self_attn_map: false
+  capture_every_n_epochs: 5
+  capture_max_samples_per_epoch: 64
+  cross_attn:
+    store: summary
+    max_tokens: 64
+    max_heads: 4
+  self_attn:
+    store: summary
+    layers: all
+    max_tokens: 64
+    max_heads: 4
+    topk_keys: 5
+    include_token_labels: true
+
+  # Off by default. Enabling currently fails fast before backward unless a safe
+  # per-sample grad implementation is wired into train logging.
+  grad_norm_sample: false
+  grad_norm_max_samples: 2
+  merge_on_epoch_end: false
