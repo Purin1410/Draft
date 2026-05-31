@@ -115,7 +115,7 @@ wandb:
   wandb_watch_log: "gradients"
   wandb_watch_log_freq: 1000
   upload_artifacts: true
-  artifact_cleanup_local: false
+  artifact_cleanup_local: true
   keep_last_local_checkpoints: 1
 
 rclone:
