@@ -203,6 +203,14 @@ class LitCoMER(pl.LightningModule):
             self.train(was_training)
 
     def _analysis_log_train_batch(self, batch: Batch, logits_for_logging, batch_idx):
+        trainer = self._analysis_trainer_or_none()
+        if trainer is not None and getattr(trainer, "profiler", None) is not None:
+            with trainer.profiler.profile("analysis_log_train_batch"):
+                self._analysis_log_train_batch_core(batch, logits_for_logging, batch_idx)
+        else:
+            self._analysis_log_train_batch_core(batch, logits_for_logging, batch_idx)
+
+    def _analysis_log_train_batch_core(self, batch: Batch, logits_for_logging, batch_idx):
         cfg = getattr(self, "analysis_logging_cfg", None) or {}
         sample_indices = self._reserve_analysis_sample_indices(cfg, "train", batch, batch_idx=batch_idx)
         if not sample_indices:
@@ -248,12 +256,11 @@ class LitCoMER(pl.LightningModule):
             ids_to_label,
             canonicalize_ids,
             select_l2r,
-            build_token_detail,
-            build_teacher_forced_top1,
+            build_teacher_forced_payloads,
             make_meta_id,
             build_log_paths,
-            append_csv_rows,
-            append_jsonl_rows,
+            append_csv_rows_buffered,
+            append_jsonl_rows_buffered,
             serialize_topk_preds,
             compute_rank_gt_in_beam,
             should_log_csv,
@@ -351,19 +358,17 @@ class LitCoMER(pl.LightningModule):
         # 5. JSONL token details
         jsonl_rows = []
         if should_log_detail(cfg, phase):
-            # Check if at least one detail payload is enabled (must not write metadata-only rows)
-            if phase_cfg.get("token_detail", False) or phase_cfg.get("teacher_forced_top1", False) or (topk_enabled and nbest_outputs is not None):
+            log_token_detail = bool(phase_cfg.get("token_detail", False))
+            log_teacher_forced_top1 = bool(phase_cfg.get("teacher_forced_top1", False))
+            if log_token_detail or log_teacher_forced_top1 or (topk_enabled and nbest_outputs is not None):
                 token_topk = phase_cfg.get("token_topk", 5)
+                token_details = [[] for _ in range(batch_size)]
+                teacher_forced_top1s = [[] for _ in range(batch_size)]
                 
-                if phase_cfg.get("token_detail", False) and l_logits is not None and l_targets is not None:
-                    token_details = build_token_detail(l_logits, l_targets, self.vocab_info, topk=token_topk)
-                else:
-                    token_details = [[] for _ in range(batch_size)]
-                    
-                if phase_cfg.get("teacher_forced_top1", False) and l_logits is not None and l_targets is not None:
-                    teacher_forced_top1s = build_teacher_forced_top1(l_logits, l_targets, self.vocab_info)
-                else:
-                    teacher_forced_top1s = [[] for _ in range(batch_size)]
+                if (log_token_detail or log_teacher_forced_top1) and l_logits is not None and l_targets is not None:
+                    token_details, teacher_forced_top1s = build_teacher_forced_payloads(
+                        l_logits, l_targets, self.vocab_info, topk=token_topk
+                    )
 
                 for j, i in enumerate(sample_indices):
                     sample_id = batch.img_bases[i]
@@ -377,9 +382,9 @@ class LitCoMER(pl.LightningModule):
                     row = {
                         "meta_id": meta_id,
                     }
-                    if phase_cfg.get("token_detail", False):
+                    if log_token_detail:
                         row["token_detail"] = token_details[i]
-                    if phase_cfg.get("teacher_forced_top1", False):
+                    if log_teacher_forced_top1:
                         row["teacher_forced_top1"] = teacher_forced_top1s[i]
                     # topk_preds from actual beam candidates
                     if topk_enabled and nbest_outputs is not None:
@@ -398,9 +403,9 @@ class LitCoMER(pl.LightningModule):
         csv_path, jsonl_path = build_log_paths(log_dir, run_id, seeds, epoch, rank, phase=phase)
 
         if len(csv_rows) > 0:
-            append_csv_rows(csv_path, csv_rows, include_decode_fields=has_decode)
+            append_csv_rows_buffered(csv_path, csv_rows, include_decode_fields=has_decode, cfg=cfg)
         if len(jsonl_rows) > 0:
-            append_jsonl_rows(jsonl_path, jsonl_rows, include_topk_preds=topk_enabled and nbest_outputs is not None)
+            append_jsonl_rows_buffered(jsonl_path, jsonl_rows, include_topk_preds=topk_enabled and nbest_outputs is not None, cfg=cfg)
 
     def _maybe_log_analysis_aux(self, batch, phase: str):
         cfg = getattr(self, "analysis_logging_cfg", None) or {}
@@ -411,7 +416,7 @@ class LitCoMER(pl.LightningModule):
             should_log_phase, should_capture_aux, resolve_analysis_run_id,
             get_phase_cfg,
             mean_pool_embed, reshape_cross_attn,
-            attention_entropy, get_dist_info, build_log_paths, append_jsonl_rows,
+            attention_entropy, get_dist_info, build_log_paths, append_jsonl_rows_buffered,
             serialize_self_attn_for_sample, make_meta_id,
         )
         if not should_log_phase(cfg, phase):
@@ -575,7 +580,7 @@ class LitCoMER(pl.LightningModule):
             
         if jsonl_rows:
             _, jsonl_path = build_log_paths(log_dir, run_id, seeds, epoch, rank, phase=phase)
-            append_jsonl_rows(jsonl_path, jsonl_rows)
+            append_jsonl_rows_buffered(jsonl_path, jsonl_rows, cfg=cfg)
 
     def on_fit_start(self):
         self._init_warmup_if_needed()
@@ -622,14 +627,12 @@ class LitCoMER(pl.LightningModule):
         sampler.set_epoch(int(self.current_epoch))
     
     def on_train_epoch_end(self):
-        cfg = getattr(self, "analysis_logging_cfg", None) or {}
-        if cfg.get("enabled", False) and cfg.get("merge_on_epoch_end", False):
-            from utils.analysis_logging import maybe_merge_shards, resolve_analysis_run_id, get_dist_info
-            run_id = resolve_analysis_run_id(cfg, "CoMER", self.config.get("seed_everything", ""))
-            seeds = str(cfg.get("seeds") or self.config.get("seed_everything", ""))
-            epoch = int(self.current_epoch)
-            rank, _ = get_dist_info()
-            maybe_merge_shards(cfg, run_id, seeds, epoch, "train", rank)
+        from utils.analysis_logging import flush_all_buffers
+        flush_all_buffers()
+
+    def on_train_end(self):
+        from utils.analysis_logging import flush_all_buffers
+        flush_all_buffers()
         
 
     def validation_epoch_end(self, *args, **kwargs):

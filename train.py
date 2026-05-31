@@ -59,17 +59,45 @@ class RcloneUploadCallback(Callback):
 
         epoch_num = trainer.current_epoch + 1
         if epoch_num % self.every_n_epochs == 0:
-            self._upload_completed(trainer)
+            self._merge_and_upload(trainer, pl_module)
 
     def on_train_end(self, trainer, pl_module):
         if not trainer.is_global_zero:
             return
 
         if self.upload_on_train_end:
-            self._upload_completed(trainer)
+            self._merge_and_upload(trainer, pl_module)
+
+    def _merge_and_upload(self, trainer, pl_module):
+        cfg = getattr(pl_module, "analysis_logging_cfg", None) or {}
+        if cfg.get("enabled", False) and cfg.get("merge_on_epoch_end", False):
+            from utils.analysis_logging import maybe_merge_shards, resolve_analysis_run_id, get_dist_info
+            run_id = resolve_analysis_run_id(cfg, "CoMER", pl_module.config.get("seed_everything", ""))
+            seeds = str(cfg.get("seeds") or pl_module.config.get("seed_everything", ""))
+            epoch = int(trainer.current_epoch)
+            rank, _ = get_dist_info()
+            maybe_merge_shards(cfg, run_id, seeds, epoch, "train", rank)
+        self._upload_completed(trainer)
 
     def _upload_completed(self, trainer):
-        files = collect_uploadable_files([self.checkpoint_dir, self.analysis_dir])
+        pl_module = trainer.lightning_module
+        run_name = None
+        if pl_module is not None:
+            cfg = getattr(pl_module, "analysis_logging_cfg", None) or {}
+            from utils.analysis_logging import resolve_analysis_run_id
+            run_name = resolve_analysis_run_id(cfg, "CoMER", pl_module.config.get("seed_everything", ""))
+        
+        if not run_name:
+            run_name = _cfg_get(self.wandb_cfg, "name", None)
+
+        paths = []
+        if _cfg_get(self.rclone_cfg, "upload_checkpoints", True):
+            paths.append(self.checkpoint_dir)
+        if _cfg_get(self.rclone_cfg, "upload_analysis_logs", True):
+            paths.append(self.analysis_dir)
+        if not paths:
+            return
+        files = collect_uploadable_files(paths, run_name=run_name)
         if not files:
             return
 
@@ -81,6 +109,7 @@ class RcloneUploadCallback(Callback):
                 rclone_command=_cfg_get(self.rclone_cfg, "command", "rclone"),
                 copy_flags=_cfg_get(self.rclone_cfg, "copy_flags", ["--update", "--verbose", "--no-traverse"]),
                 fail_on_error=_cfg_get(self.rclone_cfg, "fail_on_error", False),
+                run_name=run_name,
             )
 
         wandb_ok = True
@@ -90,6 +119,7 @@ class RcloneUploadCallback(Callback):
                 wandb_run,
                 files,
                 fail_on_error=_cfg_get(self.wandb_cfg, "fail_on_error", False),
+                run_name=run_name,
             )
 
         maybe_cleanup_uploaded_files(
@@ -98,6 +128,7 @@ class RcloneUploadCallback(Callback):
             wandb_ok=wandb_ok,
             cleanup=_cfg_get(self.wandb_cfg, "artifact_cleanup_local", False),
             keep_last_local_checkpoints=_cfg_get(self.wandb_cfg, "keep_last_local_checkpoints", 1),
+            run_name=run_name,
         )
 
 

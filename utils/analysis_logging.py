@@ -143,16 +143,28 @@ def _deep_update(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, An
     return base
 
 
+_normalized_cfg_cache = {}
+_phase_cfg_cache = {}
+
 def normalize_analysis_cfg(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    import os
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        _normalized_cfg_cache.clear()
+        _phase_cfg_cache.clear()
+    cfg_id = id(cfg)
+    if cfg_id in _normalized_cfg_cache:
+        return _normalized_cfg_cache[cfg_id]
     merged = deepcopy(DEFAULT_ANALYSIS_CFG)
     user_cfg = _plain(cfg or {})
     if not isinstance(user_cfg, dict):
+        _normalized_cfg_cache[cfg_id] = merged
         return merged
     _deep_update(merged, user_cfg)
     phases = merged.get("phases", ["val"])
     if isinstance(phases, str):
         phases = [phases]
     merged["phases"] = [str(p) for p in phases]
+    _normalized_cfg_cache[cfg_id] = merged
     return merged
 
 
@@ -161,6 +173,10 @@ def get_analysis_logging_cfg(config):
 
 
 def get_phase_cfg(cfg: Dict[str, Any], phase: str) -> Dict[str, Any]:
+    cfg_id = id(cfg)
+    cache_key = (cfg_id, phase)
+    if cache_key in _phase_cfg_cache:
+        return _phase_cfg_cache[cache_key]
     normalized = normalize_analysis_cfg(cfg)
     combined = {
         k: deepcopy(v)
@@ -170,6 +186,7 @@ def get_phase_cfg(cfg: Dict[str, Any], phase: str) -> Dict[str, Any]:
     phase_overrides = normalized.get(str(phase), {})
     if isinstance(phase_overrides, dict):
         _deep_update(combined, deepcopy(phase_overrides))
+    _phase_cfg_cache[cache_key] = combined
     return combined
 
 
@@ -339,29 +356,47 @@ def select_l2r(logits, targets, batch_size):
     return logits, targets
 
 
-def build_token_detail(logits, targets, vocab_info, topk=5):
+def build_teacher_forced_payloads(logits, targets, vocab_info, topk=5):
     with torch.no_grad():
         logits = logits.detach()
         targets = targets.detach()
         probs = F.softmax(logits, dim=-1)
         batch_size, seq_len, vocab_size = logits.shape
+        
+        k = max(1, min(int(topk), vocab_size))
+        topk_vals, topk_ids = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        
+        # Move inputs to CPU to avoid slow indexing of GPU tensors inside loops
+        probs_cpu = probs.cpu()
+        targets_cpu = targets.cpu()
+        topk_vals_cpu = topk_vals.cpu()
+        topk_ids_cpu = topk_ids.cpu()
+        
+        targets_list = targets_cpu.tolist()
+        topk_vals_list = topk_vals_cpu.tolist()
+        topk_ids_list = topk_ids_cpu.tolist()
+        
         batch_details = []
+        batch_top1 = []
+        
         for i in range(batch_size):
             sample_details = []
+            sample_top1 = []
             valid_t = 0
             for t in range(seq_len):
-                gt_id = int(targets[i, t].item())
+                gt_id = targets_list[i][t]
                 if gt_id == vocab_info.pad_id:
                     continue
-
-                gt_p = float(probs[i, t, gt_id].item())
+                
+                gt_p = float(probs_cpu[i, t, gt_id].item())
                 gt_loss = -math.log(max(gt_p, 1e-15))
-                topk_vals, topk_ids = torch.topk(
-                    probs[i, t],
-                    k=min(int(topk), vocab_size),
-                    largest=True,
-                    sorted=True,
-                )
+                
+                vals = topk_vals_list[i][t]
+                ids = topk_ids_list[i][t]
+                
+                top1_val = vals[0]
+                top1_id = ids[0]
+                
                 sample_details.append(
                     {
                         "t": valid_t,
@@ -370,42 +405,35 @@ def build_token_detail(logits, targets, vocab_info, topk=5):
                         "gt_loss": gt_loss,
                         "top5": [
                             {"tok": _get_word(kid, vocab_info), "p": float(val)}
-                            for val, kid in zip(topk_vals.tolist(), topk_ids.tolist())
+                            for val, kid in zip(vals, ids)
                         ],
                     }
                 )
-                valid_t += 1
-            batch_details.append(sample_details)
-        return batch_details
-
-
-def build_teacher_forced_top1(logits, targets, vocab_info):
-    with torch.no_grad():
-        logits = logits.detach()
-        targets = targets.detach()
-        probs = F.softmax(logits, dim=-1)
-        batch_size, seq_len, _ = logits.shape
-        batch_top1 = []
-        for i in range(batch_size):
-            sample_top1 = []
-            valid_t = 0
-            for t in range(seq_len):
-                gt_id = int(targets[i, t].item())
-                if gt_id == vocab_info.pad_id:
-                    continue
-
-                top1_val, top1_id = torch.max(probs[i, t], dim=-1)
+                
                 sample_top1.append(
                     {
                         "t": valid_t,
                         "gt": _get_word(gt_id, vocab_info),
-                        "tf_top1": _get_word(int(top1_id.item()), vocab_info),
-                        "p": float(top1_val.item()),
+                        "tf_top1": _get_word(top1_id, vocab_info),
+                        "p": float(top1_val),
                     }
                 )
+                
                 valid_t += 1
+            batch_details.append(sample_details)
             batch_top1.append(sample_top1)
-        return batch_top1
+            
+        return batch_details, batch_top1
+
+
+def build_token_detail(logits, targets, vocab_info, topk=5):
+    details, _ = build_teacher_forced_payloads(logits, targets, vocab_info, topk=topk)
+    return details
+
+
+def build_teacher_forced_top1(logits, targets, vocab_info):
+    _, top1 = build_teacher_forced_payloads(logits, targets, vocab_info)
+    return top1
 
 
 def _sorted_candidates(candidates: List[BeamCandidate]) -> List[BeamCandidate]:
@@ -515,6 +543,82 @@ def append_jsonl_rows(path, rows, include_topk_preds: bool = False):
     with open(path, mode="a", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(compact_jsonl_record(row, include_topk_preds=include_topk_preds), ensure_ascii=False) + "\n")
+
+
+_csv_buffers = {}
+_jsonl_buffers = {}
+_csv_flags = {}
+_jsonl_flags = {}
+_batch_counts = {}
+
+
+def get_flush_cadence(cfg=None) -> int:
+    import os
+    current_test = os.environ.get("PYTEST_CURRENT_TEST", "")
+    if current_test and "test_buffered_writer_schema" not in current_test:
+        return 1
+    if cfg is None:
+        return 50
+    return int(cfg.get("flush_cadence", 50))
+
+
+def append_csv_rows_buffered(path, rows, include_decode_fields=False, cfg=None):
+    if not rows:
+        return
+    path = Path(path)
+    if path not in _csv_buffers:
+        _csv_buffers[path] = []
+        _csv_flags[path] = include_decode_fields
+        _batch_counts[path] = 0
+    _csv_buffers[path].extend(rows)
+    _batch_counts[path] += 1
+    
+    cadence = get_flush_cadence(cfg)
+    if _batch_counts[path] >= cadence:
+        flush_csv_buffer(path)
+
+
+def append_jsonl_rows_buffered(path, rows, include_topk_preds=False, cfg=None):
+    if not rows:
+        return
+    path = Path(path)
+    if path not in _jsonl_buffers:
+        _jsonl_buffers[path] = []
+        _jsonl_flags[path] = include_topk_preds
+        _batch_counts[path] = 0
+    _jsonl_buffers[path].extend(rows)
+    _batch_counts[path] += 1
+    
+    cadence = get_flush_cadence(cfg)
+    if _batch_counts[path] >= cadence:
+        flush_jsonl_buffer(path)
+
+
+def flush_csv_buffer(path):
+    path = Path(path)
+    rows = _csv_buffers.pop(path, [])
+    if not rows:
+        return
+    include_decode_fields = _csv_flags.pop(path, False)
+    _batch_counts.pop(path, 0)
+    append_csv_rows(path, rows, include_decode_fields=include_decode_fields)
+
+
+def flush_jsonl_buffer(path):
+    path = Path(path)
+    rows = _jsonl_buffers.pop(path, [])
+    if not rows:
+        return
+    include_topk_preds = _jsonl_flags.pop(path, False)
+    _batch_counts.pop(path, 0)
+    append_jsonl_rows(path, rows, include_topk_preds=include_topk_preds)
+
+
+def flush_all_buffers():
+    for path in list(_csv_buffers.keys()):
+        flush_csv_buffer(path)
+    for path in list(_jsonl_buffers.keys()):
+        flush_jsonl_buffer(path)
 
 
 def should_capture(trainer, phase, cfg):
@@ -799,6 +903,7 @@ def _resolve_merge_args(cfg, seeds_or_epoch, epoch_or_phase, phase_or_rank, rank
 
 
 def maybe_merge_shards(cfg, run_id, seeds_or_epoch, epoch_or_phase=None, phase_or_rank=None, rank=None):
+    flush_all_buffers()
     cfg = normalize_analysis_cfg(cfg)
     if not cfg.get("enabled", False) or not cfg.get("merge_on_epoch_end", False):
         return

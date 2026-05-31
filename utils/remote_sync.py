@@ -22,7 +22,9 @@ def join_rclone_path(remote_dir: str, rel_path: str) -> str:
 
 
 def build_remote_run_dir(rclone_cfg: Dict[str, Any], run_name: str) -> str:
-    remote_root = _get(rclone_cfg, "remote_root", "purin_gdrive:Baseline_HMER")
+    remote_root = _get(rclone_cfg, "remote_root", None)
+    if not remote_root:
+        raise ValueError("Missing required config: remote_root in rclone_cfg")
     run_dir = _get(rclone_cfg, "run_dir", None) or run_name
     return join_rclone_path(remote_root, str(run_dir))
 
@@ -51,7 +53,7 @@ def select_latest_checkpoint(items: List[Dict[str, Any]], run_name: str) -> Opti
     return max(candidates, key=lambda x: x["epoch"])
 
 
-def is_completed_upload_file(path: Path) -> bool:
+def is_completed_upload_file(path: Path, run_name: Optional[str] = None) -> bool:
     path = Path(path)
     if not path.is_file():
         return False
@@ -60,10 +62,12 @@ def is_completed_upload_file(path: Path) -> bool:
     name = path.name
     if "_rank_" in name or name.endswith(".tmp") or name.endswith(".partial"):
         return False
+    if run_name is not None and not name.startswith(run_name):
+        return False
     return path.stat().st_size > 0
 
 
-def collect_uploadable_files(paths: Iterable[Path]) -> List[Path]:
+def collect_uploadable_files(paths: Iterable[Path], run_name: Optional[str] = None) -> List[Path]:
     files: List[Path] = []
     for root in paths:
         root_path = Path(root)
@@ -74,7 +78,7 @@ def collect_uploadable_files(paths: Iterable[Path]) -> List[Path]:
         else:
             candidates = []
         for path in candidates:
-            if is_completed_upload_file(path):
+            if is_completed_upload_file(path, run_name=run_name):
                 files.append(path)
     return sorted(dict.fromkeys(files))
 
@@ -155,11 +159,12 @@ def upload_files(
     rclone_command: str = "rclone",
     copy_flags: Optional[List[str]] = None,
     fail_on_error: bool = False,
+    run_name: Optional[str] = None,
 ) -> bool:
     ok = True
     flags = copy_flags or ["--update", "--verbose", "--no-traverse"]
     local_root = Path(local_root).resolve() if local_root is not None else None
-    for file_path in collect_uploadable_files(files):
+    for file_path in collect_uploadable_files(files, run_name=run_name):
         file_path = Path(file_path)
         rel_parent = "."
         if local_root is not None:
@@ -176,11 +181,11 @@ def upload_files(
     return ok
 
 
-def log_wandb_files(wandb_run, files: Iterable[Path], *, fail_on_error: bool = False) -> bool:
+def log_wandb_files(wandb_run, files: Iterable[Path], *, fail_on_error: bool = False, run_name: Optional[str] = None) -> bool:
     if wandb_run is None:
         return True
     try:
-        for file_path in collect_uploadable_files(files):
+        for file_path in collect_uploadable_files(files, run_name=run_name):
             if hasattr(wandb_run, "save"):
                 wandb_run.save(str(file_path), base_path=str(file_path.parent), policy="now")
             elif hasattr(wandb_run, "log"):
@@ -192,8 +197,8 @@ def log_wandb_files(wandb_run, files: Iterable[Path], *, fail_on_error: bool = F
         return False
 
 
-def cleanup_uploaded_files(files: Iterable[Path], *, keep_last_local_checkpoints: int = 1) -> List[Path]:
-    uploadable = collect_uploadable_files(files)
+def cleanup_uploaded_files(files: Iterable[Path], *, keep_last_local_checkpoints: int = 1, run_name: Optional[str] = None) -> List[Path]:
+    uploadable = collect_uploadable_files(files, run_name=run_name)
     ckpts = sorted(
         (p for p in uploadable if p.suffix == ".ckpt"),
         key=lambda p: (p.stat().st_mtime, p.name),
@@ -219,7 +224,8 @@ def maybe_cleanup_uploaded_files(
     wandb_ok: bool,
     cleanup: bool,
     keep_last_local_checkpoints: int = 1,
+    run_name: Optional[str] = None,
 ) -> List[Path]:
     if not cleanup or not rclone_ok or not wandb_ok:
         return []
-    return cleanup_uploaded_files(files, keep_last_local_checkpoints=keep_last_local_checkpoints)
+    return cleanup_uploaded_files(files, keep_last_local_checkpoints=keep_last_local_checkpoints, run_name=run_name)
