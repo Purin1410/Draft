@@ -69,12 +69,22 @@ class TAMER(pl.LightningModule):
         )
 
     def forward(
-        self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor
+        self, img: FloatTensor, img_mask: LongTensor, tgt: LongTensor,
+        return_aux: bool = False, capture_embed: bool = False,
+        capture_cross_attn: bool = False, capture_self_attn: bool = False
     ) -> TAMERDecoderOutput:
         feature, mask = self.encoder(img, img_mask)
         feature = torch.cat((feature, feature), dim=0)
         mask = torch.cat((mask, mask), dim=0)
-        return self.decoder(feature, mask, tgt)
+        return self.decoder(
+            feature,
+            mask,
+            tgt,
+            return_aux=return_aux,
+            capture_embed=capture_embed,
+            capture_cross_attn=capture_cross_attn,
+            capture_self_attn=capture_self_attn,
+        )
 
     def beam_search(
         self,
@@ -99,4 +109,5 @@ class TAMER(pl.LightningModule):
             temperature,
             tree_rescore_cfg=self.tree_rescore_cfg,
             current_epoch=current_epoch,
+            return_nbest=kwargs.get("return_nbest", False),
         )
