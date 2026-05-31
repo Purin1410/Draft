@@ -106,8 +106,10 @@ class Decoder(DecodeModel):
         return mask
 
     def forward(
-        self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor
-    ) -> FloatTensor:
+        self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor,
+        return_aux: bool = False, capture_embed: bool = False,
+        capture_cross_attn: bool = False, capture_self_attn: bool = False
+    ):
         """generate output for tgt
 
         Parameters
@@ -138,7 +140,7 @@ class Decoder(DecodeModel):
         src_mask = rearrange(src_mask, "b h w -> b (h w)")
         tgt = rearrange(tgt, "b l d -> l b d")
 
-        out = self.model(
+        model_out = self.model(
             tgt=tgt,
             memory=src,
             height=h,
@@ -146,12 +148,37 @@ class Decoder(DecodeModel):
             tgt_key_padding_mask=tgt_pad_mask,
             memory_key_padding_mask=src_mask,
             tgt_vocab=tgt_vocab,
+            return_attn_maps=capture_cross_attn,
+            return_self_attn_maps=capture_self_attn,
         )
 
-        out = rearrange(out, "l b d -> b l d")
-        out = self.proj(out)
+        attn_maps = None
+        self_attn_maps = None
+        if capture_cross_attn and capture_self_attn:
+            out, attn_payload = model_out
+            attn_maps = attn_payload.get("cross_attn")
+            self_attn_maps = attn_payload.get("self_attn")
+        elif capture_cross_attn:
+            out, attn_maps = model_out
+        elif capture_self_attn:
+            out, attn_payload = model_out
+            self_attn_maps = attn_payload.get("self_attn")
+        else:
+            out = model_out
 
-        return out
+        out = rearrange(out, "l b d -> b l d")
+        embed_seq = out.detach() if capture_embed else None
+        logits = self.proj(out)
+
+        if return_aux:
+            aux = {
+                "embed_seq": embed_seq,
+                "cross_attn": attn_maps,
+                "self_attn": self_attn_maps,
+                "height": h,
+            }
+            return logits, aux
+        return logits
 
 
     def transform(

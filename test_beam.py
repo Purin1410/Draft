@@ -77,13 +77,38 @@ def test_topk_2_beam_size():
     assert "torch.topk(" in content and "2 * beam_size" in content
     print("[PASS] topk(2 * beam_size) is present")
 
-def test_padding_logic():
+def test_padding_logic(tmp_path):
     print("Verifying batch_max padding in datamodule...")
     from datamodule.datamodule import CROHMEDatamodule
     from sconf import Config
     
     # Mock config
-    config = Config({"data": {"dictionary_txt": "crohme_data/data/dictionary.txt", "pad_strategy": "batch_max"}})
+    dict_path = tmp_path / "dictionary.txt"
+    dict_path.write_text("a\nb\nc\nd\n", encoding="utf-8")
+    config = Config({
+        "seed_everything": 7,
+        "model": {"max_len": 200, "position": {"enabled": False}},
+        "data": {
+            "zipfile_path": "crohme_data/data",
+            "test_year": "2014",
+            "dictionary_txt": str(dict_path),
+            "train_batch_size": 2,
+            "eval_batch_size": 2,
+            "num_workers": 0,
+            "scale_aug": False,
+            "max_pixels_per_batch": 1280000,
+            "lazy_load": False,
+            "k_min": 0.7,
+            "k_max": 1.4,
+            "w_lo": 16,
+            "w_hi": 1024,
+            "h_lo": 16,
+            "h_hi": 256,
+            "pin_memory": False,
+            "persistent_workers": False,
+            "pad_strategy": "batch_max",
+        },
+    })
     # We need a real dictionary or mock Vocab
     from unittest.mock import MagicMock
     dm = CROHMEDatamodule(config)

@@ -96,18 +96,37 @@ class PosFormer(pl.LightningModule):
         img_mask: LongTensor,
         tgt: LongTensor,
         pos_tgt: Optional[FloatTensor] = None,
-    ) -> Tuple[FloatTensor, Optional[FloatTensor], Optional[FloatTensor]]:
+        return_aux: bool = False, capture_embed: bool = False,
+        capture_cross_attn: bool = False, capture_self_attn: bool = False
+    ):
         feature, mask = self.encoder(img, img_mask)
         feature = torch.cat((feature, feature), dim=0)
         mask = torch.cat((mask, mask), dim=0)
 
-        word_logits = self.decoder(feature, mask, tgt)
-        if not self.position_enabled:
-            return word_logits, None, None
-        if pos_tgt is None:
-            raise ValueError("pos_tgt is required when PosFormer position branch is enabled.")
+        decoder_out = self.decoder(
+            feature,
+            mask,
+            tgt,
+            return_aux=return_aux,
+            capture_embed=capture_embed,
+            capture_cross_attn=capture_cross_attn,
+            capture_self_attn=capture_self_attn,
+        )
+        if return_aux:
+            word_logits, aux = decoder_out
+        else:
+            word_logits = decoder_out
+            aux = None
 
-        layer_logits, pos_logits = self.pos_decoder(feature, mask, tgt, pos_tgt)
+        if not self.position_enabled:
+            layer_logits, pos_logits = None, None
+        else:
+            if pos_tgt is None:
+                raise ValueError("pos_tgt is required when PosFormer position branch is enabled.")
+            layer_logits, pos_logits = self.pos_decoder(feature, mask, tgt, pos_tgt)
+            
+        if return_aux:
+            return (word_logits, layer_logits, pos_logits), aux
         return word_logits, layer_logits, pos_logits
 
     def beam_search(
@@ -123,5 +142,5 @@ class PosFormer(pl.LightningModule):
     ) -> List[Hypothesis]:
         feature, mask = self.encoder(img, img_mask)
         return self.decoder.beam_search(
-            [feature], [mask], beam_size, max_len, alpha, early_stopping, temperature
+            [feature], [mask], beam_size, max_len, alpha, early_stopping, temperature, return_nbest=kwargs.get("return_nbest", False)
         )

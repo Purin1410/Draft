@@ -129,7 +129,7 @@ def test_beam_search_skips_position_decoder():
     def fail_position_forward(*args, **kwargs):
         raise AssertionError("position decoder must not run during beam search")
 
-    def fake_expression_beam_search(src, src_mask, beam_size, max_len, alpha, early_stopping, temperature):
+    def fake_expression_beam_search(src, src_mask, beam_size, max_len, alpha, early_stopping, temperature, **kwargs):
         return ["expression-only"]
 
     model.pos_decoder.forward = fail_position_forward

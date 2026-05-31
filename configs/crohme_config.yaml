@@ -11,7 +11,7 @@ trainer:
         save_top_k: 1
         monitor: val_ExpRate # val_ExpRate
         mode: max
-        filename: '{epoch}-{val_ExpRate:.4f}'
+        filename: 'runtime_run_{epoch}-{val_ExpRate:.4f}'
   # gpus: 1
   gpus: 0,1
   accelerator: ddp #gpu
@@ -94,7 +94,7 @@ model:
     ReduceLROnPlateau:
       mode: 'max'
       factor: 0.25
-      patience: 12
+      patience: 6
     warmup:
       enabled: true
       interval: "step"
@@ -126,8 +126,100 @@ data:
   lazy_load: false
 
 wandb:
-  name: "PosFormer"
-  project: "DSP391m_Group1_FALL25"
+  name: "runtime_run"
+  project: "Baseline_HMER"
   wandb_watch: false
   wandb_watch_log: "gradients"
   wandb_watch_log_freq: 1000
+  upload_artifacts: true
+  artifact_cleanup_local: true
+  keep_last_local_checkpoints: 1
+
+rclone:
+  enabled: true
+  # Example: "purin_gdrive:" or "purin_gdrive:Baseline_HMER".
+  remote_root: "purin_gdrive:Baseline_HMER"
+  # Runtime default is run_name. Override only for debugging.
+  run_dir: null
+  resume: true
+  recursive_list: true
+  every_n_epochs: 1
+  upload_on_train_end: true
+  upload_checkpoints: true
+  upload_analysis_logs: true
+  command: rclone
+  copy_flags: ["--update", "--verbose", "--no-traverse"]
+  download_flags: ["--progress"]
+  fail_on_error: false
+
+analysis_logging:
+  # Master switch for compact train analysis logs. Options: true, false.
+  enabled: true
+  # Directory for compact CSV/JSONL logs. Final files are grouped by run_id.
+  log_dir: analysis_logs
+  # Runtime override from CLI; do not hardcode final experiment names here.
+  run_id: null
+  # Runtime override from CLI; used in filenames only, not repeated in CSV/JSONL.
+  seeds: null
+  # Default target phase. Options: [train], [val], [test], or tested combinations.
+  phases: [train]
+
+  # Active compact logging features.
+  csv_core: true
+  jsonl_detail: true
+  token_detail: true
+  token_topk: 5
+  teacher_forced_top1: true
+  skip_sanity_check: true
+
+  # Options for train analysis. Keep decode_autoregressive false for compact teacher-forced logs.
+  train:
+    enabled: true
+    log_every_n_steps: 1
+    max_batches_per_epoch: null
+    max_samples_per_epoch: null
+    decode_autoregressive: false
+    log_csv_without_decode: true
+    jsonl_detail: true
+    topk_preds: false
+
+  # Validation analysis is off by default. Enable only with matching schema tests.
+  val:
+    enabled: false
+    max_samples_per_epoch: null
+
+  # Test analysis is off by default. Enable only with matching schema tests.
+  test:
+    enabled: false
+    max_samples_per_epoch: null
+
+  # DDP merge behavior. Deletes rank shards only after successful atomic merge.
+  merge_on_epoch_end: true
+  delete_shards_after_merge: true
+
+  # Heavy/off-by-default debug captures.
+  topk_preds: false
+  nbest_k: 0
+  capture_embed: false
+  capture_cross_attn: false
+  capture_self_attn: false
+  full_cross_attn_map: false
+  full_self_attn_map: false
+  capture_every_n_epochs: 0
+  capture_max_samples_per_epoch: 64
+  cross_attn:
+    store: summary
+    max_tokens: 64
+    max_heads: 4
+  self_attn:
+    store: summary
+    layers: all
+    max_tokens: 64
+    max_heads: 4
+    topk_keys: 5
+    include_token_labels: true
+
+  # Off by default. Enabling currently fails fast before backward unless a safe
+  # per-sample grad implementation is wired into train logging.
+  grad_norm_sample: false
+  grad_norm_max_samples: 2
