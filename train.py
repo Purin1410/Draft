@@ -20,6 +20,31 @@ from utils.remote_sync import (
 )
 from utils.run_identity import apply_runtime_overrides
 
+def _lightning_barrier(trainer, name=None):
+    # Lightning >= 1.5 / 2.x
+    strategy = getattr(trainer, "strategy", None)
+    if strategy is not None and hasattr(strategy, "barrier"):
+        return strategy.barrier(name)
+
+    # Lightning 1.x old APIs
+    plugin = getattr(trainer, "training_type_plugin", None)
+    if plugin is None:
+        accelerator = getattr(trainer, "accelerator", None)
+        plugin = getattr(accelerator, "training_type_plugin", None)
+
+    if plugin is not None and hasattr(plugin, "barrier"):
+        return plugin.barrier(name)
+
+    # Final fallback
+    import torch
+    import torch.distributed as dist
+
+    if dist.is_available() and dist.is_initialized():
+        if torch.cuda.is_available() and dist.get_backend() == "nccl":
+            dist.barrier(device_ids=[torch.cuda.current_device()])
+        else:
+            dist.barrier()
+
 class MoreValidationCallback(pl.Callback):
     def __init__(self, monitor="val_ExpRate"):
         self.monitor = monitor
@@ -94,8 +119,10 @@ class RcloneUploadCallback(Callback):
             self._upload_completed(trainer)
 
         if world_size > 1:
-            trainer.strategy.barrier("analysis_upload_done")
+            # trainer.strategy.barrier("analysis_upload_done")
+            _lightning_barrier(trainer, "analysis_upload_done")
 
+    
     def _upload_completed(self, trainer):
         if not trainer.is_global_zero:
             return
