@@ -620,10 +620,8 @@ class LitCoMER(pl.LightningModule):
             )
 
         sampler.set_epoch(int(self.current_epoch))
-
-        # ================================================
-        #  MERGE ANALYSIS LOGS ON TRAIN EPOCH START
-        # ================================================
+    
+    def on_train_epoch_end(self):
         cfg = getattr(self, "analysis_logging_cfg", None) or {}
         if cfg.get("enabled", False) and cfg.get("merge_on_epoch_end", False):
             from utils.analysis_logging import maybe_merge_shards, resolve_analysis_run_id, get_dist_info
@@ -632,6 +630,7 @@ class LitCoMER(pl.LightningModule):
             epoch = int(self.current_epoch)
             rank, _ = get_dist_info()
             maybe_merge_shards(cfg, run_id, seeds, epoch, "train", rank)
+        
 
     def validation_epoch_end(self, *args, **kwargs):
         pass
