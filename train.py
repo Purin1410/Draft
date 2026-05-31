@@ -49,37 +49,56 @@ class RcloneUploadCallback(Callback):
         self.wandb_cfg = wandb_cfg or {}
         self.every_n_epochs = _cfg_get(self.rclone_cfg, "every_n_epochs", 1)
         self.upload_on_train_end = _cfg_get(self.rclone_cfg, "upload_on_train_end", True)
+        self._last_upload_epoch = None
 
     def on_train_epoch_end(self, trainer, pl_module):
-        if not trainer.is_global_zero:
-            return
-
         if self.every_n_epochs is None:
             return
-
-        epoch_num = trainer.current_epoch + 1
-        if epoch_num % self.every_n_epochs == 0:
+        epoch_num = int(trainer.current_epoch) + 1
+        if epoch_num % int(self.every_n_epochs) == 0:
             self._merge_and_upload(trainer, pl_module)
+            self._last_upload_epoch = int(trainer.current_epoch)
 
     def on_train_end(self, trainer, pl_module):
-        if not trainer.is_global_zero:
+        if not self.upload_on_train_end:
             return
-
-        if self.upload_on_train_end:
-            self._merge_and_upload(trainer, pl_module)
+        current_epoch = int(getattr(trainer, "current_epoch", 0))
+        if self._last_upload_epoch == current_epoch:
+            return
+        self._merge_and_upload(trainer, pl_module)
+        self._last_upload_epoch = current_epoch
 
     def _merge_and_upload(self, trainer, pl_module):
+        from utils.analysis_logging import (
+            flush_all_buffers,
+            get_dist_info,
+            maybe_merge_shards,
+            resolve_analysis_run_id,
+        )
+
+        # local process buffers are per-rank; every rank must flush its own buffers
+        flush_all_buffers()
+
         cfg = getattr(pl_module, "analysis_logging_cfg", None) or {}
+        rank, world_size = get_dist_info()
+
         if cfg.get("enabled", False) and cfg.get("merge_on_epoch_end", False):
-            from utils.analysis_logging import maybe_merge_shards, resolve_analysis_run_id, get_dist_info
             run_id = resolve_analysis_run_id(cfg, "CoMER", pl_module.config.get("seed_everything", ""))
             seeds = str(cfg.get("seeds") or pl_module.config.get("seed_everything", ""))
             epoch = int(trainer.current_epoch)
-            rank, _ = get_dist_info()
+            # IMPORTANT: all ranks call this; rank 0 merges, others wait/return inside function.
             maybe_merge_shards(cfg, run_id, seeds, epoch, "train", rank)
-        self._upload_completed(trainer)
+
+        # Keep non-zero ranks parked until rank 0 upload finishes, so all ranks leave callback together.
+        if rank == 0:
+            self._upload_completed(trainer)
+
+        if world_size > 1:
+            trainer.strategy.barrier("analysis_upload_done")
 
     def _upload_completed(self, trainer):
+        if not trainer.is_global_zero:
+            return
         pl_module = trainer.lightning_module
         run_name = None
         if pl_module is not None:
