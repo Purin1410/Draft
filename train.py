@@ -5,15 +5,20 @@ from pytorch_lightning.callbacks import (
     ModelCheckpoint,
     Callback
 )
-import subprocess
 from pytorch_lightning.loggers import WandbLogger as Logger
 import argparse
 from sconf import Config
-import os
-import re
-import json
-import subprocess
 from pathlib import Path
+from utils.remote_sync import (
+    build_remote_run_dir,
+    collect_uploadable_files,
+    ensure_remote_dir,
+    find_and_download_latest_checkpoint,
+    log_wandb_files,
+    maybe_cleanup_uploaded_files,
+    upload_files,
+)
+from utils.run_identity import apply_runtime_overrides
 
 class MoreValidationCallback(pl.Callback):
     def __init__(self, monitor="val_ExpRate"):
@@ -26,19 +31,24 @@ class MoreValidationCallback(pl.Callback):
                 trainer.check_val_every_n_epoch = 1
 
 class RcloneUploadCallback(Callback):
-    """
-    Copy all checkpoint files from local_dir to remote_dir.
+    """Upload completed checkpoints and merged analysis logs only."""
 
-    Important:
-      - use rclone copy, not move, so local checkpoints stay available
-      - do not use --ignore-existing, so rewritten files can be updated remotely
-    """
-    def __init__(self, local_dir, remote_dir, every_n_epochs=1, upload_on_train_end=True):
+    def __init__(
+        self,
+        checkpoint_dir,
+        analysis_dir,
+        remote_run_dir,
+        rclone_cfg=None,
+        wandb_cfg=None,
+    ):
         super().__init__()
-        self.local_dir = str(local_dir)
-        self.remote_dir = remote_dir
-        self.every_n_epochs = every_n_epochs
-        self.upload_on_train_end = upload_on_train_end
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.analysis_dir = Path(analysis_dir)
+        self.remote_run_dir = remote_run_dir
+        self.rclone_cfg = rclone_cfg or {}
+        self.wandb_cfg = wandb_cfg or {}
+        self.every_n_epochs = _cfg_get(self.rclone_cfg, "every_n_epochs", 1)
+        self.upload_on_train_end = _cfg_get(self.rclone_cfg, "upload_on_train_end", True)
 
     def on_train_epoch_end(self, trainer, pl_module):
         if not trainer.is_global_zero:
@@ -49,30 +59,46 @@ class RcloneUploadCallback(Callback):
 
         epoch_num = trainer.current_epoch + 1
         if epoch_num % self.every_n_epochs == 0:
-            self._rclone_upload()
+            self._upload_completed(trainer)
 
     def on_train_end(self, trainer, pl_module):
         if not trainer.is_global_zero:
             return
 
         if self.upload_on_train_end:
-            self._rclone_upload()
+            self._upload_completed(trainer)
 
-    def _rclone_upload(self):
-        print("Uploading checkpoints to remote...")
-        command = [
-            "rclone",
-            "copy",
-            "--update",
-            "--verbose",
-            self.local_dir,
-            self.remote_dir,
-        ]
-        try:
-            subprocess.run(command, check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"Error during upload: {e}")
-        print("Upload completed.")
+    def _upload_completed(self, trainer):
+        files = collect_uploadable_files([self.checkpoint_dir, self.analysis_dir])
+        if not files:
+            return
+
+        rclone_ok = True
+        if _cfg_get(self.rclone_cfg, "enabled", True):
+            rclone_ok = upload_files(
+                files,
+                remote_run_dir=self.remote_run_dir,
+                rclone_command=_cfg_get(self.rclone_cfg, "command", "rclone"),
+                copy_flags=_cfg_get(self.rclone_cfg, "copy_flags", ["--update", "--verbose", "--no-traverse"]),
+                fail_on_error=_cfg_get(self.rclone_cfg, "fail_on_error", False),
+            )
+
+        wandb_ok = True
+        if _cfg_get(self.wandb_cfg, "upload_artifacts", True):
+            wandb_run = getattr(getattr(trainer, "logger", None), "experiment", None)
+            wandb_ok = log_wandb_files(
+                wandb_run,
+                files,
+                fail_on_error=_cfg_get(self.wandb_cfg, "fail_on_error", False),
+            )
+
+        maybe_cleanup_uploaded_files(
+            files,
+            rclone_ok=rclone_ok,
+            wandb_ok=wandb_ok,
+            cleanup=_cfg_get(self.wandb_cfg, "artifact_cleanup_local", False),
+            keep_last_local_checkpoints=_cfg_get(self.wandb_cfg, "keep_last_local_checkpoints", 1),
+        )
 
 
 class ConditionalLastCheckpointCallback(Callback):
@@ -204,120 +230,40 @@ class ConditionalLastCheckpointCallback(Callback):
         )
 
 
-def _join_rclone_path(remote_dir: str, rel_path: str) -> str:
-    remote_dir = remote_dir.rstrip("/")
-    rel_path = rel_path.lstrip("/")
-    if remote_dir.endswith(":"):
-        return f"{remote_dir}{rel_path}"
-    return f"{remote_dir}/{rel_path}"
-
-
-def find_latest_remote_checkpoint(
-    remote_dir: str,
-    filename_prefix: str,
-    local_dir: str = "checkpoints",
-    recursive: bool = False,
-):
-    """
-    Find latest checkpoint on rclone remote by epoch number and download it.
-
-    Supports names like:
-      LiSRB_CROHME_seed7_12-0.5678.ckpt
-      LiSRB_CROHME_seed7_epoch=12-val_ExpRate=0.5678.ckpt
-    """
-    Path(local_dir).mkdir(parents=True, exist_ok=True)
-
-    cmd = ["rclone", "lsjson", remote_dir, "--files-only"]
-    if recursive:
-        cmd.append("-R")
-
-    try:
-        result = subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"[auto-resume] Could not list remote checkpoints: {e}")
-        print(e.stderr)
-        return None
-
-    try:
-        items = json.loads(result.stdout or "[]")
-    except json.JSONDecodeError as e:
-        print(f"[auto-resume] Could not parse rclone lsjson output: {e}")
-        return None
-
-    # Match both:
-    #   LiSRB_CROHME_seed7_12-0.1234.ckpt
-    #   LiSRB_CROHME_seed7_epoch=12-val_ExpRate=0.1234.ckpt
-    pattern = re.compile(
-        rf"(^|/){re.escape(filename_prefix)}(?:epoch=)?(?P<epoch>\d+).*\.ckpt$"
-    )
-
-    candidates = []
-    for item in items:
-        rel_path = item.get("Path") or item.get("Name")
-        if not rel_path:
-            continue
-
-        m = pattern.search(rel_path)
-        if m is None:
-            continue
-
-        epoch = int(m.group("epoch"))
-        candidates.append((epoch, rel_path))
-
-    if not candidates:
-        print(f"[auto-resume] No checkpoint matching prefix: {filename_prefix}")
-        return None
-
-    latest_epoch, latest_rel_path = max(candidates, key=lambda x: x[0])
-
-    remote_ckpt = _join_rclone_path(remote_dir, latest_rel_path)
-    local_ckpt = str(Path(local_dir) / Path(latest_rel_path).name)
-
-    print(f"[auto-resume] Found latest remote checkpoint:")
-    print(f"  epoch      = {latest_epoch}")
-    print(f"  remote     = {remote_ckpt}")
-    print(f"  local path = {local_ckpt}")
-
-    try:
-        subprocess.run(
-            ["rclone", "copyto", remote_ckpt, local_ckpt, "--progress"],
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"[auto-resume] Failed to download checkpoint: {e}")
-        return None
-
-    return local_ckpt
-
-def get_ckpt_prefix_from_config(config):
-    filename = config.trainer.callbacks[1].init_args.filename
-    return filename.split("{", 1)[0]
+def _cfg_get(cfg, key, default=None):
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
 
 def train(config):
     pl.seed_everything(config.seed_everything, workers=True)
+    run_name = config.analysis_logging.run_id
+    rclone_cfg = _cfg_get(config, "rclone", {})
+    remote_run_dir = build_remote_run_dir(rclone_cfg, run_name)
 
     # Auto resume from GDrive/rclone if local resume path is not set
-    if config.trainer.resume_from_checkpoint is None:
-        latest_ckpt = find_latest_remote_checkpoint(
-            remote_dir=config.trainer.get("resume_remote_dir", "purin_gdrive:"),
-            filename_prefix=config.trainer.get(
-                "resume_ckpt_prefix",
-                get_ckpt_prefix_from_config(config),
-                # f"LiSRB_CROHME_seed{config.seed_everything}_",
-            ),
+    if _cfg_get(rclone_cfg, "enabled", True) and _cfg_get(rclone_cfg, "resume", True) and config.trainer.resume_from_checkpoint is None:
+        latest_ckpt = find_and_download_latest_checkpoint(
+            remote_run_dir=remote_run_dir,
+            run_name=run_name,
             local_dir=config.trainer.default_root_dir,
-            recursive=config.trainer.get("resume_remote_recursive", False),
+            rclone_command=_cfg_get(rclone_cfg, "command", "rclone"),
+            recursive=_cfg_get(rclone_cfg, "recursive_list", True),
+            download_flags=_cfg_get(rclone_cfg, "download_flags", ["--progress"]),
+            fail_on_error=_cfg_get(rclone_cfg, "fail_on_error", False),
         )
 
         if latest_ckpt is not None:
             config.trainer.resume_from_checkpoint = latest_ckpt
             print(f"[auto-resume] Will resume from: {latest_ckpt}")
         else:
+            ensure_remote_dir(
+                remote_run_dir,
+                rclone_command=_cfg_get(rclone_cfg, "command", "rclone"),
+                fail_on_error=_cfg_get(rclone_cfg, "fail_on_error", False),
+            )
             print("[auto-resume] No remote checkpoint found. Training from scratch.")
 
     # Data
@@ -350,7 +296,7 @@ def train(config):
     lr_callback = LearningRateMonitor(logging_interval=config.trainer.callbacks[0].init_args.logging_interval)
 
     ckpt_dir = config.trainer.default_root_dir
-    remote_dir = config.trainer.get("resume_remote_dir", "purin_gdrive:")
+    analysis_dir = Path(config.analysis_logging.log_dir) / str(run_name)
 
     checkpoint_callback = ModelCheckpoint(
         save_top_k = config.trainer.callbacks[1].init_args.save_top_k,
@@ -369,10 +315,11 @@ def train(config):
     )
 
     rclone_callback = RcloneUploadCallback(
-        local_dir           = ckpt_dir,
-        remote_dir          = remote_dir,
-        every_n_epochs      = config.trainer.get("rclone_every_n_epochs", 1),
-        upload_on_train_end = True,
+        checkpoint_dir      = ckpt_dir,
+        analysis_dir        = analysis_dir,
+        remote_run_dir      = remote_run_dir,
+        rclone_cfg          = rclone_cfg,
+        wandb_cfg           = _cfg_get(config, "wandb", {}),
     )
 
     callback = [lr_callback, checkpoint_callback, conditional_last_callback, rclone_callback]
@@ -400,10 +347,30 @@ def train(config):
     trainer.fit(model_module,data_module)
 
 
+def _non_empty_arg(value: str) -> str:
+    value = str(value).strip()
+    if not value:
+        raise argparse.ArgumentTypeError("value cannot be empty")
+    return value
+
+
 if __name__ == "__main__":    
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--config", type=_non_empty_arg, required=True)
+    parser.add_argument("--model_name", type=_non_empty_arg, required=True)
+    parser.add_argument("--datasets", type=_non_empty_arg, required=True)
+    parser.add_argument("--seeds", type=_non_empty_arg, required=True)
+    parser.add_argument("--run_type", type=_non_empty_arg, choices=["baseline", "ablation"], required=True)
+    parser.add_argument("--ablation_type", type=_non_empty_arg, required=False, default=None)
     args = parser.parse_args()
     config = Config(args.config)
+    apply_runtime_overrides(
+        config,
+        model_name=args.model_name,
+        datasets=args.datasets,
+        seeds=args.seeds,
+        run_type=args.run_type,
+        ablation_type=args.ablation_type,
+    )
     print(config.dumps())
     train(config)

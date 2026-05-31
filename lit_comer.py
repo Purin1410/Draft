@@ -250,6 +250,7 @@ class LitCoMER(pl.LightningModule):
             select_l2r,
             build_token_detail,
             build_teacher_forced_top1,
+            make_meta_id,
             build_log_paths,
             append_csv_rows,
             append_jsonl_rows,
@@ -278,6 +279,7 @@ class LitCoMER(pl.LightningModule):
         epoch = int(self.current_epoch)
         global_step = int(self.global_step)
         seed = self.config.get("seed_everything", "")
+        seeds = str(cfg.get("seeds") or seed)
 
         # 3. Handle bidirectional tensors
         batch_size = len(batch.img_bases)
@@ -307,11 +309,6 @@ class LitCoMER(pl.LightningModule):
                     pred_label = ids_to_label(pred_ids, self.vocab_info)
                     pred_score = getattr(hyps[hyp_idx], "score", "")
 
-                # Beam size
-                beam_size = phase_cfg.get("beam_size", getattr(self.hparams, "beam_size", 10))
-                if hasattr(self, "hparams") and "beam_size" in self.hparams:
-                    beam_size = self.hparams.beam_size
-
                 # Exact match
                 exact_match = (
                     canonicalize_ids(pred_ids, self.vocab_info)
@@ -321,28 +318,32 @@ class LitCoMER(pl.LightningModule):
 
                 # rank_gt_in_beam from actual beam candidates
                 rank_gt = ""
-                if topk_enabled and nbest_outputs is not None and i < len(nbest_outputs):
+                if topk_enabled and nbest_outputs is not None:
                     out_idx = j if len(nbest_outputs) == len(sample_indices) else i
-                    rank_gt = compute_rank_gt_in_beam(
-                        gt_ids, nbest_outputs[out_idx].candidates, self.vocab_info
-                    )
+                    if out_idx < len(nbest_outputs):
+                        rank_gt = compute_rank_gt_in_beam(
+                            gt_ids, nbest_outputs[out_idx].candidates, self.vocab_info
+                        )
 
                 # input_h, input_w from mask[i]
                 input_h, input_w = valid_hw_from_mask(batch.mask[i])
+                meta_id = make_meta_id(
+                    rank=rank,
+                    global_step=global_step,
+                    batch_idx=batch_idx,
+                    sample_index=i,
+                    sample_id=sample_id,
+                )
 
                 csv_rows.append({
-                    "run_id": run_id,
-                    "epoch": epoch,
+                    "meta_id": meta_id,
                     "global_step": global_step,
-                    "seed": seed,
-                    "phase": phase,
                     "sample_id": sample_id,
                     "input_h": input_h,
                     "input_w": input_w,
                     "gt": gt_label,
-                    "predict": pred_label,
+                    "pred": pred_label,
                     "pred_score": pred_score,
-                    "beam_size": beam_size,
                     "rank_gt_in_beam": rank_gt,
                     "exact_match": exact_match
                 })
@@ -366,36 +367,40 @@ class LitCoMER(pl.LightningModule):
 
                 for j, i in enumerate(sample_indices):
                     sample_id = batch.img_bases[i]
+                    meta_id = make_meta_id(
+                        rank=rank,
+                        global_step=global_step,
+                        batch_idx=batch_idx,
+                        sample_index=i,
+                        sample_id=sample_id,
+                    )
                     row = {
-                        "run_id": run_id,
-                        "epoch": epoch,
-                        "global_step": global_step,
-                        "phase": phase,
-                        "sample_id": sample_id,
+                        "meta_id": meta_id,
                     }
                     if phase_cfg.get("token_detail", False):
                         row["token_detail"] = token_details[i]
                     if phase_cfg.get("teacher_forced_top1", False):
                         row["teacher_forced_top1"] = teacher_forced_top1s[i]
                     # topk_preds from actual beam candidates
-                    if topk_enabled and nbest_outputs is not None and i < len(nbest_outputs):
+                    if topk_enabled and nbest_outputs is not None:
                         out_idx = j if len(nbest_outputs) == len(sample_indices) else i
-                        row["topk_preds"] = serialize_topk_preds(
-                            nbest_outputs[out_idx].candidates, self.vocab_info, nbest_k=nbest_k
-                        )
-                        row["rank_gt_in_beam"] = compute_rank_gt_in_beam(
-                            batch.indices[i], nbest_outputs[out_idx].candidates, self.vocab_info
-                        )
+                        if out_idx < len(nbest_outputs):
+                            row["topk_preds"] = serialize_topk_preds(
+                                nbest_outputs[out_idx].candidates, self.vocab_info, nbest_k=nbest_k
+                            )
+                            row["rank_gt_in_beam"] = compute_rank_gt_in_beam(
+                                batch.indices[i], nbest_outputs[out_idx].candidates, self.vocab_info
+                            )
                     jsonl_rows.append(row)
 
         # 6. Build paths and write
         log_dir = phase_cfg.get("log_dir", "analysis_logs")
-        csv_path, jsonl_path = build_log_paths(log_dir, run_id, phase, epoch, rank)
+        csv_path, jsonl_path = build_log_paths(log_dir, run_id, seeds, epoch, rank, phase=phase)
 
         if len(csv_rows) > 0:
-            append_csv_rows(csv_path, csv_rows)
+            append_csv_rows(csv_path, csv_rows, include_decode_fields=has_decode)
         if len(jsonl_rows) > 0:
-            append_jsonl_rows(jsonl_path, jsonl_rows)
+            append_jsonl_rows(jsonl_path, jsonl_rows, include_topk_preds=topk_enabled and nbest_outputs is not None)
 
     def _maybe_log_analysis_aux(self, batch, phase: str):
         cfg = getattr(self, "analysis_logging_cfg", None) or {}
@@ -407,7 +412,7 @@ class LitCoMER(pl.LightningModule):
             get_phase_cfg,
             mean_pool_embed, reshape_cross_attn,
             attention_entropy, get_dist_info, build_log_paths, append_jsonl_rows,
-            serialize_self_attn_for_sample,
+            serialize_self_attn_for_sample, make_meta_id,
         )
         if not should_log_phase(cfg, phase):
             return
@@ -451,6 +456,7 @@ class LitCoMER(pl.LightningModule):
         logits, aux = out
         rank, _ = get_dist_info()
         run_id = resolve_analysis_run_id(cfg, "CoMER", self.config.get("seed_everything", ""))
+        seeds = str(cfg.get("seeds") or self.config.get("seed_everything", ""))
         log_dir = phase_cfg.get("log_dir", "analysis_logs")
         epoch = getattr(trainer, "current_epoch", 0)
         global_step = getattr(trainer, "global_step", 0)
@@ -536,6 +542,13 @@ class LitCoMER(pl.LightningModule):
                 if embeds is None and cross_attns is None and (self_attns is None or self_attns[i] is None):
                     continue
                 row = {
+                    "meta_id": make_meta_id(
+                        rank=rank,
+                        global_step=global_step,
+                        batch_idx=None,
+                        sample_index=i,
+                        sample_id=batch.img_bases[i],
+                    ),
                     "run_id": run_id,
                     "record_type": "aux",
                     "schema_version": "hmer-analysis-v1",
@@ -561,7 +574,7 @@ class LitCoMER(pl.LightningModule):
                 jsonl_rows.append(row)
             
         if jsonl_rows:
-            _, jsonl_path = build_log_paths(log_dir, run_id, phase, epoch, rank)
+            _, jsonl_path = build_log_paths(log_dir, run_id, seeds, epoch, rank, phase=phase)
             append_jsonl_rows(jsonl_path, jsonl_rows)
 
     def on_fit_start(self):
@@ -576,18 +589,20 @@ class LitCoMER(pl.LightningModule):
         if cfg.get("enabled", False) and cfg.get("merge_on_epoch_end", False):
             from utils.analysis_logging import maybe_merge_shards, resolve_analysis_run_id, get_dist_info
             run_id = resolve_analysis_run_id(cfg, "CoMER", self.config.get("seed_everything", ""))
+            seeds = str(cfg.get("seeds") or self.config.get("seed_everything", ""))
             epoch = int(self.current_epoch)
             rank, _ = get_dist_info()
-            maybe_merge_shards(cfg, run_id, epoch, "val", rank)
+            maybe_merge_shards(cfg, run_id, seeds, epoch, "val", rank)
 
     def on_train_epoch_end(self):
         cfg = getattr(self, "analysis_logging_cfg", None) or {}
         if cfg.get("enabled", False) and cfg.get("merge_on_epoch_end", False):
             from utils.analysis_logging import maybe_merge_shards, resolve_analysis_run_id, get_dist_info
             run_id = resolve_analysis_run_id(cfg, "CoMER", self.config.get("seed_everything", ""))
+            seeds = str(cfg.get("seeds") or self.config.get("seed_everything", ""))
             epoch = int(self.current_epoch)
             rank, _ = get_dist_info()
-            maybe_merge_shards(cfg, run_id, epoch, "train", rank)
+            maybe_merge_shards(cfg, run_id, seeds, epoch, "train", rank)
     
     def on_train_epoch_start(self):
         sampler = None
@@ -660,9 +675,10 @@ class LitCoMER(pl.LightningModule):
         if cfg.get("enabled", False) and cfg.get("merge_on_epoch_end", False):
             from utils.analysis_logging import maybe_merge_shards, resolve_analysis_run_id, get_dist_info
             run_id = resolve_analysis_run_id(cfg, "CoMER", self.config.get("seed_everything", ""))
+            seeds = str(cfg.get("seeds") or self.config.get("seed_everything", ""))
             epoch = int(self.current_epoch)
             rank, _ = get_dist_info()
-            maybe_merge_shards(cfg, run_id, epoch, "test", rank)
+            maybe_merge_shards(cfg, run_id, seeds, epoch, "test", rank)
 
         with zipfile.ZipFile("result.zip", "w") as zip_f:
             for img_bases, preds in test_outputs:

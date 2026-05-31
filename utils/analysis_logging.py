@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import math
 from copy import deepcopy
@@ -11,53 +12,41 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 
-CSV_FIELDS = [
-    "run_id",
-    "epoch",
-    "global_step",
-    "seed",
-    "phase",
-    "sample_id",
-    "input_h",
-    "input_w",
-    "gt",
-    "predict",
-    "pred_score",
-    "beam_size",
-    "rank_gt_in_beam",
-    "exact_match",
-]
+CSV_FIELDS = ["meta_id", "global_step", "sample_id", "input_h", "input_w", "gt"]
+DECODE_CSV_FIELDS = CSV_FIELDS + ["pred", "pred_score", "rank_gt_in_beam", "exact_match"]
+DEFAULT_JSONL_FIELDS = ("meta_id", "token_detail", "teacher_forced_top1")
 
 
 DEFAULT_ANALYSIS_CFG: Dict[str, Any] = {
-    "enabled": False,
+    "enabled": True,
     "log_dir": "analysis_logs",
     "run_id": None,
-    "phases": ["val"],
+    "seeds": None,
+    "phases": ["train"],
     "csv_core": True,
     "jsonl_detail": True,
     "skip_sanity_check": True,
     "token_detail": True,
     "token_topk": 5,
     "teacher_forced_top1": True,
-    "topk_preds": True,
-    "nbest_k": 10,
+    "topk_preds": False,
+    "nbest_k": 0,
     "train": {
-        "enabled": False,
-        "log_every_n_steps": 500,
-        "max_batches_per_epoch": 1,
-        "max_samples_per_epoch": 128,
+        "enabled": True,
+        "log_every_n_steps": 1,
+        "max_batches_per_epoch": None,
+        "max_samples_per_epoch": None,
         "decode_autoregressive": False,
-        "log_csv_without_decode": False,
+        "log_csv_without_decode": True,
         "jsonl_detail": True,
         "topk_preds": False,
     },
     "val": {
-        "enabled": True,
+        "enabled": False,
         "max_samples_per_epoch": None,
     },
     "test": {
-        "enabled": True,
+        "enabled": False,
         "max_samples_per_epoch": None,
     },
     "capture_embed": False,
@@ -67,7 +56,7 @@ DEFAULT_ANALYSIS_CFG: Dict[str, Any] = {
     # cross_attn.max_tokens and cross_attn.max_heads.
     "full_cross_attn_map": False,
     "full_self_attn_map": False,
-    "capture_every_n_epochs": 5,
+    "capture_every_n_epochs": 0,
     "capture_max_samples_per_epoch": 64,
     "cross_attn": {
         "store": "summary",
@@ -85,6 +74,7 @@ DEFAULT_ANALYSIS_CFG: Dict[str, Any] = {
     "grad_norm_sample": False,
     "grad_norm_max_samples": 2,
     "merge_on_epoch_end": True,
+    "delete_shards_after_merge": True,
 }
 
 
@@ -466,31 +456,65 @@ def compute_rank_gt_in_beam(gt_ids, candidates: List[BeamCandidate], vocab_info)
     return -1
 
 
-def build_log_paths(log_dir, run_id, phase, epoch, rank):
-    base_dir = Path(log_dir) / str(run_id) / str(phase)
-    csv_path = base_dir / f"epoch_{int(epoch):04d}_rank_{int(rank)}.csv"
-    jsonl_path = base_dir / f"epoch_{int(epoch):04d}_rank_{int(rank)}.jsonl"
+def get_csv_fields(include_decode_fields: bool) -> List[str]:
+    return list(DECODE_CSV_FIELDS if include_decode_fields else CSV_FIELDS)
+
+
+def make_meta_id(
+    *,
+    rank: int,
+    global_step: int,
+    sample_id: str,
+    batch_idx: Optional[int] = None,
+    sample_index: Optional[int] = None,
+) -> str:
+    raw = f"{int(rank)}|{int(global_step)}|{batch_idx}|{sample_index}|{sample_id}"
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+    return f"m_{digest}"
+
+
+def compact_jsonl_record(row: Dict[str, Any], include_topk_preds: bool = False) -> Dict[str, Any]:
+    if "record_type" in row:
+        return dict(row)
+
+    compact = {
+        "meta_id": row.get("meta_id", ""),
+        "token_detail": row.get("token_detail", []),
+        "teacher_forced_top1": row.get("teacher_forced_top1", []),
+    }
+    if include_topk_preds and "topk_preds" in row:
+        compact["topk_preds"] = row.get("topk_preds", [])
+    return compact
+
+
+def build_log_paths(log_dir, run_id, seeds, epoch, rank, phase="train"):
+    del phase
+    base_dir = Path(log_dir) / str(run_id)
+    stem = f"{run_id}_{seeds}_{int(epoch):04d}_rank_{int(rank)}"
+    csv_path = base_dir / f"{stem}.csv"
+    jsonl_path = base_dir / f"{stem}.jsonl"
     return csv_path, jsonl_path
 
 
-def append_csv_rows(path, rows):
+def append_csv_rows(path, rows, include_decode_fields: bool = False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     file_exists = path.exists()
+    fieldnames = get_csv_fields(include_decode_fields)
     with open(path, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         if not file_exists:
             writer.writeheader()
         for row in rows:
-            writer.writerow({field: row.get(field, "") for field in CSV_FIELDS})
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
 
 
-def append_jsonl_rows(path, rows):
+def append_jsonl_rows(path, rows, include_topk_preds: bool = False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, mode="a", encoding="utf-8") as f:
         for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.write(json.dumps(compact_jsonl_record(row, include_topk_preds=include_topk_preds), ensure_ascii=False) + "\n")
 
 
 def should_capture(trainer, phase, cfg):
@@ -655,53 +679,85 @@ def attention_entropy(attn, dim=-1):
     return -(attn * torch.log(attn + epsilon)).sum(dim=dim)
 
 
+def _dedupe_key(row: Dict[str, Any], fallback_fields: Tuple[str, ...]) -> Tuple[str, ...]:
+    if row.get("meta_id"):
+        record_type = str(row.get("record_type", "core"))
+        return ("meta_id", str(row["meta_id"]), record_type)
+    key = tuple(str(row.get(k, "")) for k in fallback_fields)
+    if "record_type" in row:
+        key = key + (str(row["record_type"]),)
+    return key
+
+
+def _atomic_replace_records_jsonl(records: Iterable[Dict[str, Any]], output_path: Path) -> int:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_name(f"{output_path.name}.tmp")
+    count = 0
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        for rec in records:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            count += 1
+    tmp_path.replace(output_path)
+    return count
+
+
+def _delete_existing(paths: Iterable[Path]) -> None:
+    for path in paths:
+        try:
+            Path(path).unlink()
+        except FileNotFoundError:
+            pass
+
+
 def merge_rank_shards_jsonl(
     shard_paths: List[str],
     output_path: str,
-    key_fields: Tuple[str, ...] = ("run_id", "epoch", "phase", "sample_id"),
+    key_fields: Tuple[str, ...] = ("meta_id",),
+    delete_shards: bool = False,
 ) -> int:
     seen = set()
     records = []
+    existing_shards = [Path(p) for p in shard_paths if Path(p).exists()]
     for p in shard_paths:
         path = Path(p)
         if not path.exists():
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            key_list = [str(obj.get(k, "")) for k in key_fields]
-            if "record_type" in obj:
-                key_list.append(str(obj["record_type"]))
-            key = tuple(key_list)
-            if key in seen:
-                continue
-            seen.add(key)
-            records.append(obj)
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                key = _dedupe_key(obj, key_fields)
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(compact_jsonl_record(obj, include_topk_preds=("topk_preds" in obj)))
 
     out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
-        for rec in records:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    return len(records)
+    count = _atomic_replace_records_jsonl(records, out)
+    if delete_shards:
+        _delete_existing(existing_shards)
+    return count
 
 
 def merge_rank_shards_csv(
     shard_paths: List[str],
     output_path: str,
-    key_fields: Tuple[str, ...] = ("run_id", "epoch", "phase", "sample_id"),
+    key_fields: Tuple[str, ...] = ("meta_id",),
+    delete_shards: bool = False,
+    include_decode_fields: bool = False,
 ) -> int:
     seen = set()
     records = []
+    existing_shards = [Path(p) for p in shard_paths if Path(p).exists()]
     for p in shard_paths:
         path = Path(p)
         if not path.exists():
             continue
         with open(path, "r", newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                key = tuple(row.get(k, "") for k in key_fields)
+                key = _dedupe_key(row, key_fields)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -709,18 +765,44 @@ def merge_rank_shards_csv(
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+    tmp_path = out.with_name(f"{out.name}.tmp")
+    fieldnames = get_csv_fields(include_decode_fields)
+    with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for rec in records:
-            writer.writerow({field: rec.get(field, "") for field in CSV_FIELDS})
+            writer.writerow({field: rec.get(field, "") for field in fieldnames})
+    tmp_path.replace(out)
+    if delete_shards:
+        _delete_existing(existing_shards)
     return len(records)
 
 
-def maybe_merge_shards(cfg, run_id, epoch, phase, rank):
+def _resolve_merge_args(cfg, seeds_or_epoch, epoch_or_phase, phase_or_rank, rank):
+    cfg = normalize_analysis_cfg(cfg)
+    if rank is None:
+        seeds = cfg.get("seeds")
+        epoch = seeds_or_epoch
+        phase = epoch_or_phase
+        resolved_rank = phase_or_rank
+    elif phase_or_rank is None and isinstance(epoch_or_phase, str):
+        seeds = cfg.get("seeds")
+        epoch = seeds_or_epoch
+        phase = epoch_or_phase
+        resolved_rank = rank
+    else:
+        seeds = seeds_or_epoch
+        epoch = epoch_or_phase
+        phase = phase_or_rank
+        resolved_rank = rank
+    return str(seeds if seeds is not None else ""), int(epoch), str(phase), int(resolved_rank)
+
+
+def maybe_merge_shards(cfg, run_id, seeds_or_epoch, epoch_or_phase=None, phase_or_rank=None, rank=None):
     cfg = normalize_analysis_cfg(cfg)
     if not cfg.get("enabled", False) or not cfg.get("merge_on_epoch_end", False):
         return
+    seeds, epoch, phase, rank = _resolve_merge_args(cfg, seeds_or_epoch, epoch_or_phase, phase_or_rank, rank)
     if not should_log_phase(cfg, phase):
         return
 
@@ -735,28 +817,54 @@ def maybe_merge_shards(cfg, run_id, epoch, phase, rank):
 
     phase_cfg = get_phase_cfg(cfg, phase)
     log_dir = phase_cfg.get("log_dir", "analysis_logs")
-    base_dir = Path(log_dir) / str(run_id) / str(phase)
+    base_dir = Path(log_dir) / str(run_id)
     if not base_dir.exists():
         if world_size > 1:
             dist.barrier()
         return
 
-    csv_shards = sorted(base_dir.glob(f"epoch_{int(epoch):04d}_rank_*.csv"))
+    include_decode_fields = str(phase) != "train" or bool(phase_cfg.get("decode_autoregressive", False))
+    delete_shards = bool(cfg.get("delete_shards_after_merge", True))
+    stem = f"{run_id}_{seeds}_{int(epoch):04d}"
+
+    csv_shards = sorted(base_dir.glob(f"{stem}_rank_*.csv"))
     if csv_shards:
         merge_rank_shards_csv(
             [str(p) for p in csv_shards],
-            str(base_dir / f"epoch_{int(epoch):04d}.csv"),
+            str(base_dir / f"{stem}.csv"),
+            delete_shards=delete_shards,
+            include_decode_fields=include_decode_fields,
         )
 
-    jsonl_shards = sorted(base_dir.glob(f"epoch_{int(epoch):04d}_rank_*.jsonl"))
+    jsonl_shards = sorted(base_dir.glob(f"{stem}_rank_*.jsonl"))
     if jsonl_shards:
         merge_rank_shards_jsonl(
             [str(p) for p in jsonl_shards],
-            str(base_dir / f"epoch_{int(epoch):04d}.jsonl"),
+            str(base_dir / f"{stem}.jsonl"),
+            delete_shards=delete_shards,
         )
 
     if world_size > 1:
         dist.barrier()
+
+
+def collect_completed_analysis_files(run_dir) -> List[Path]:
+    run_dir = Path(run_dir)
+    if not run_dir.exists():
+        return []
+    files: List[Path] = []
+    for path in sorted(run_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.suffix not in {".csv", ".jsonl"}:
+            continue
+        name = path.name
+        if "_rank_" in name or name.endswith(".tmp") or name.endswith(".partial"):
+            continue
+        if path.stat().st_size <= 0:
+            continue
+        files.append(path)
+    return files
 
 
 def compute_per_sample_grad_norm(
