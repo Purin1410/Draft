@@ -49,32 +49,8 @@ class RcloneUploadCallback(Callback):
         self.wandb_cfg = wandb_cfg or {}
         self.every_n_epochs = _cfg_get(self.rclone_cfg, "every_n_epochs", 1)
         self.upload_on_train_end = _cfg_get(self.rclone_cfg, "upload_on_train_end", True)
-    
-    def _merge_current_analysis_epoch(self, pl_module, phase: str):
-        cfg = getattr(pl_module, "analysis_logging_cfg", None) or {}
-        if not cfg.get("enabled", False) or not cfg.get("merge_on_epoch_end", False):
-            return
-
-        from utils.analysis_logging import (
-            maybe_merge_shards,
-            resolve_analysis_run_id,
-            get_dist_info,
-        )
-
-        run_id = resolve_analysis_run_id(
-            cfg,
-            "CoMER",
-            pl_module.config.get("seed_everything", ""),
-        )
-        seeds = str(cfg.get("seeds") or pl_module.config.get("seed_everything", ""))
-        epoch = int(pl_module.current_epoch)
-        rank, _ = get_dist_info()
-
-        maybe_merge_shards(cfg, run_id, seeds, epoch, phase, rank)
 
     def on_train_epoch_end(self, trainer, pl_module):
-        self._merge_current_analysis_epoch(pl_module, "train")
-
         if not trainer.is_global_zero:
             return
 
