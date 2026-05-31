@@ -168,7 +168,7 @@ def upload_files(
             except ValueError:
                 rel_parent = "."
         remote_dir = remote_run_dir if rel_parent in {"", "."} else join_rclone_path(remote_run_dir, rel_parent)
-        cmd = [rclone_command, "moveto", str(file_path), remote_dir]
+        cmd = [rclone_command, "move", str(file_path), remote_dir]
         cmd.extend(flags)
         result = _run_rclone(cmd, fail_on_error=fail_on_error)
         if result is None or getattr(result, "returncode", 0) != 0:
