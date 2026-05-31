@@ -16,6 +16,27 @@ from .transformer.transformer_decoder import (
 from utils.generation_utils import DecodeModel
 
 
+class ICALDecoderOutput(tuple):
+    def __new__(cls, exp_out, imp_out, fusion_out):
+        return super().__new__(cls, (exp_out, imp_out, fusion_out))
+
+    @property
+    def exp_out(self):
+        return self[0]
+
+    @property
+    def imp_out(self):
+        return self[1]
+
+    @property
+    def fusion_out(self):
+        return self[2]
+
+    @property
+    def shape(self):
+        return self.fusion_out.shape
+
+
 def _build_transformer_decoder(
     d_model: int,
     nhead: int,
@@ -116,8 +137,10 @@ class Decoder(DecodeModel):
         return mask
 
     def forward(
-        self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor
-    ) -> Tuple[FloatTensor, FloatTensor, FloatTensor]:
+        self, src: FloatTensor, src_mask: LongTensor, tgt: LongTensor,
+        return_aux: bool = False, capture_embed: bool = False,
+        capture_cross_attn: bool = False, capture_self_attn: bool = False
+    ):
         """generate output for tgt
 
         Parameters
@@ -147,24 +170,50 @@ class Decoder(DecodeModel):
         src_mask = rearrange(src_mask, "b h w -> b (h w)")
         tgt = rearrange(tgt, "b l d -> l b d")
 
-        out = self.model(
+        model_out = self.model(
             tgt=tgt,
             memory=src,
             height=h,
             tgt_mask=tgt_mask,
             tgt_key_padding_mask=tgt_pad_mask,
             memory_key_padding_mask=src_mask,
+            return_attn_maps=capture_cross_attn,
+            return_self_attn_maps=capture_self_attn,
         )
+
+        attn_maps = None
+        self_attn_maps = None
+        if capture_cross_attn and capture_self_attn:
+            out, attn_payload = model_out
+            attn_maps = attn_payload.get("cross_attn")
+            self_attn_maps = attn_payload.get("self_attn")
+        elif capture_cross_attn:
+            out, attn_maps = model_out
+        elif capture_self_attn:
+            out, attn_payload = model_out
+            self_attn_maps = attn_payload.get("self_attn")
+        else:
+            out = model_out
 
         exp_hidden = rearrange(out, "l b d -> b l d")
         imp_hidden = self.SCCM(exp_hidden, tgt_mask, tgt_pad_mask)
         fusion_hidden = self.fusion(exp_hidden, imp_hidden)
+        embed_seq = fusion_hidden.detach() if capture_embed else None
 
         exp_out = self.exp_proj(exp_hidden)
         imp_out = self.imp_proj(imp_hidden)
         fusion_out = self.fusion_proj(fusion_hidden)
 
-        return exp_out, imp_out, fusion_out
+        decoder_out = ICALDecoderOutput(exp_out, imp_out, fusion_out)
+        if return_aux:
+            aux = {
+                "embed_seq": embed_seq,
+                "cross_attn": attn_maps,
+                "self_attn": self_attn_maps,
+                "height": h,
+            }
+            return decoder_out, aux
+        return decoder_out
 
 
     def transform(

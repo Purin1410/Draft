@@ -17,7 +17,6 @@ def test_vocab_ical_special_order():
 
         vocab = Vocab(
             dict_path=str(dict_path),
-            force_ical_special_token_order=True,
             special_tokens={
                 "pad": "<pad>",
                 "sos": "<sos>",

@@ -7,6 +7,6 @@ class VocabInfo:
     sos_id: int
     eos_id: int
     pad_id: int
-    space_id: int
-    structural_token_ids: Tuple[int, ...]
+    space_id: int = -1
+    structural_token_ids: Tuple[int, ...] = ()
     words: Any = None
