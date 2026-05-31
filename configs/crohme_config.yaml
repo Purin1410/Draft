@@ -77,7 +77,7 @@ model:
     ReduceLROnPlateau:
       mode: 'max'
       factor: 0.25
-      patience: 12
+      patience: 6
     warmup:
       enabled: true
       interval: "step"
